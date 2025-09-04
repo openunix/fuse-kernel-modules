@@ -33,7 +33,7 @@ BuildRequires:  %{_bindir}/kmodtool
 # tracks in all the kernel-devel packages
 
 # kmodtool does its magic here
-%{expand:%(kmodtool --target %{_target_cpu} --repo rpmfusion --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null) }
+%{expand:%(kmodtool --target %{_target_cpu} --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null) }
 
 %description
 
@@ -43,7 +43,7 @@ BuildRequires:  %{_bindir}/kmodtool
 %{?kmodtool_check}
 
 # print kmodtool output for debugging purposes:
-kmodtool  --target %{_target_cpu}  --repo %{repo} --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null
+kmodtool --target %{_target_cpu} --kmodname %{name} %{?buildforkernels:--%{buildforkernels}} %{?kernels:--for-kernels "%{?kernels}"} 2>/dev/null
 
 %setup -q -n %{project_name}-%{version}
 
@@ -60,7 +60,7 @@ done
 %build
 for kernel_version in %{?kernel_versions}; do
     pushd ${PWD}/_kmod_build_${kernel_version%%___*}
-    make %{?_smp_mflags}
+    make %{?_smp_mflags} -C "${kernel_version##*___}" M="$PWD"
     popd
 done
 
@@ -71,6 +71,8 @@ rm -rf ${RPM_BUILD_ROOT}
 for kernel_version in %{?kernel_versions}; do
     #make install DESTDIR=${RPM_BUILD_ROOT} KMODPATH=%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}
     install -D -m 755 _kmod_build_${kernel_version%%___*}/fuse.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/fuse.ko
+    install -D -m 755 _kmod_build_${kernel_version%%___*}/fuse.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/cuse.ko
+    install -D -m 755 _kmod_build_${kernel_version%%___*}/fuse.ko  ${RPM_BUILD_ROOT}%{kmodinstdir_prefix}/${kernel_version%%___*}/%{kmodinstdir_postfix}/virtiofs.ko
 done
 %{?akmod_install}
 

@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  fuse-kernel-modules-rpm:
+  build-all-rpm:
     runs-on: ubuntu-latest
     container:
       image: rockylinux:9
@@ -24,9 +24,13 @@ jobs:
     - name: Install tools and Libraries
       run: |
         dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm -y
+        dnf install https://download.rockylinux.org/vault/rocky/9.5/AppStream/x86_64/os/Packages/k/kernel-devel-5.14.0-503.40.1.el9_5.x86_64.rpm -y
+        dnf install https://download.rockylinux.org/vault/rocky/9.6/AppStream/x86_64/os/Packages/k/kernel-devel-5.14.0-570.26.1.el9_6.x86_64.rpm -y
         dnf install rpm-build kmodtool -y
     - name: Build the RPMS
       run: |
         rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kernel-modules.spec
-        rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
+        rpmbuild -bb --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
+        rpmbuild -ba --define "kernels 5.14.0-570.26.1.el9_6.x86_64 5.14.0-503.40.1.el9_5.x86_64" \
+                     --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
 
