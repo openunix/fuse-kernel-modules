@@ -1,0 +1,32 @@
+name: x86_64 CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  fuse-kernel-modules-rpm:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:9
+      options: --cpus 4
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: fuse-kernel-modules-7.39.0
+    - name: Create tar ball
+      run: |
+        mkdir -p rpmbuild/SOURCES rpmbuild/SPECS
+        tar zcvf rpmbuild/SOURCES/v7.39.0.tar.gz fuse-kernel-modules-7.39.0
+        cp fuse-kernel-modules-7.39.0/redhat/*.spec rpmbuild/SPECS
+    - name: Install tools and Libraries
+      run: |
+        dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm -y
+        dnf install rpm-build kmodtool -y
+    - name: Build the RPMS
+      run: |
+        rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kernel-modules.spec
+        rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
+
