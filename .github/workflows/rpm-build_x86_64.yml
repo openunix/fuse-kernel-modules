@@ -26,11 +26,18 @@ jobs:
         dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm -y
         dnf install https://download.rockylinux.org/vault/rocky/9.5/AppStream/x86_64/os/Packages/k/kernel-devel-5.14.0-503.40.1.el9_5.x86_64.rpm -y
         dnf install https://download.rockylinux.org/vault/rocky/9.6/AppStream/x86_64/os/Packages/k/kernel-devel-5.14.0-570.26.1.el9_6.x86_64.rpm -y
-        dnf install rpm-build kmodtool -y
+        dnf install rpm-build kmodtool gnupg2 rpm-sign -y
+    - name: Import GPG keys
+      run: |
+        gpg --import << EOF
+        ${{ secrets.GPG_PRIVATE_KEY }}
+        EOF
     - name: Build the RPMS
       run: |
         rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kernel-modules.spec
         rpmbuild -bb --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
         rpmbuild -ba --define "kernels 5.14.0-570.26.1.el9_6.x86_64 5.14.0-503.40.1.el9_5.x86_64" \
                      --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
+        find rpmbuild/RPMS/ -name '*.rpm' | xargs rpmsign --define "_gpg_name F96A409277704327" \
+                     --define "_gpg_sign_cmd_extra_args --batch" --addsign
 
