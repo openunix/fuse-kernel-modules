@@ -1,0 +1,50 @@
+#!/bin/bash
+
+set -e
+
+# Ubuntu 24.04
+KVER[0]='6.8.0-.*-generic'
+KSRC[0]='6.8.0-ubuntu'
+# RHEL 9.5
+KVER[1]='5.14.0-503\..*\.el9_5'
+KSRC[1]='5.14.0-503.40.1.el9_5'
+# RHEL 9.6
+KVER[2]='5.14.0-570\..*\.el9_6'
+KSRC[2]='5.14.0-570.26.1.el9_6'
+# RHEL 10.0
+KVER[3]='6.12.0-55\..*\.el10_0'
+KSRC[3]='6.12.0'
+
+command=$1
+if [ -z "${command}" ]; then
+    command="modules"
+fi
+
+kernelver=$2
+if [ -z "${kernelver}" ]; then
+    kernelver=$(uname -r)
+fi
+
+kerneldir=$3
+if [ -z "${kerneldir}" ]; then
+    kerneldir=/lib/modules/${kernelver}/build
+fi
+
+echo "Build fuse kernel module for ${command} ${kernelver} ${kerneldir}"
+
+for ((i=0; i<${#KVER[@]}; i=i+1))
+do
+    [[ $kernelver =~ ${KVER[i]} ]] && break
+done
+
+if [[ "$i" -eq "${#KVER[@]}" ]]; then
+    echo "No suitable kernel found. Exiting."
+    exit 1
+fi
+
+pushd ${KSRC[$i]}
+make -j $(($(nproc) / 2)) -C ${kerneldir} M=$PWD $command
+popd
+
+mkdir -p modules
+cp -a ${KSRC[$i]}/*.ko modules

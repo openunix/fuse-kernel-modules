@@ -15,12 +15,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        path: fuse-kernel-modules-7.39.0
+        path: fuse-kernel-modules
     - name: Create tar ball
       run: |
+        source fuse-kernel-modules/src/dkms.conf
+        cp -rf fuse-kernel-modules fuse-kernel-modules-${PACKAGE_VERSION}
         mkdir -p rpmbuild/SOURCES rpmbuild/SPECS
-        tar zcvf rpmbuild/SOURCES/v7.39.0.tar.gz fuse-kernel-modules-7.39.0
-        cp fuse-kernel-modules-7.39.0/redhat/*.spec rpmbuild/SPECS
+        tar zcvf rpmbuild/SOURCES/v${PACKAGE_VERSION}.tar.gz fuse-kernel-modules-${PACKAGE_VERSION}
+        cp fuse-kernel-modules/redhat/*.spec rpmbuild/SPECS
     - name: Install tools and Libraries
       run: |
         dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm -y
@@ -34,6 +36,9 @@ jobs:
         EOF
     - name: Build the RPMS
       run: |
+        source fuse-kernel-modules/src/dkms.conf
+        rpmbuild -ba --define "_topdir $PWD/rpmbuild" --define "fuse_version $PACKAGE_VERSION" \
+                 rpmbuild/SPECS/fuse-dkms.spec
         rpmbuild -ba --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kernel-modules.spec
         rpmbuild -bb --define "_topdir $PWD/rpmbuild" rpmbuild/SPECS/fuse-kmod.spec
         rpmbuild -ba --define "kernels 5.14.0-570.26.1.el9_6.x86_64 5.14.0-503.40.1.el9_5.x86_64" \
