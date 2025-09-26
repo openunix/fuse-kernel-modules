@@ -1,0 +1,39 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  buildrpm-rhel10-x86_64:
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:10
+      options: --cpu 4
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: fuse-kernel-modules
+    - name: Install tools and Libraries
+      run: |
+        dnf install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm -y
+        dnf install rpm-build kmodtool gnupg2 rpm-sign -y
+    - name: Import GPG keys
+      run: |
+        gpg --import << EOF
+        ${{ secrets.GPG_PRIVATE_KEY }}
+        EOF
+    - name: make tar ball
+      run: |
+        source fuse-kernel-modules/src/dkms.conf
+        cp -rf fuse-kernel-modules fuse-kernel-modules-${PACKAGE_VERSION}
+        mkdir -p rpmbuild/SOURCES rpmbuild/SPECS
+        tar zcvf rpmbuild/SOURCES/v${PACKAGE_VERSION}.tar.gz fuse-kernel-modules-${PACKAGE_VERSION}
+        cp fuse-kernel-modules/redhat/*.spec rpmbuild/SPECS
+    - name: make check
+      run: |
+        pushd fuse-kernel-modules/src
+        ./build
+        popd
