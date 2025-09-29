@@ -34,7 +34,7 @@
 
 #define pr_fmt(fmt) "CUSE: " fmt
 
-#include <linux/fuse.h>
+#include "fuse.h"
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/file.h>

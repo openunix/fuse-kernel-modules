@@ -13,7 +13,7 @@
 # define pr_fmt(fmt) "fuse: " fmt
 #endif
 
-#include <linux/fuse.h>
+#include "fuse.h"
 #include <linux/fs.h>
 #include <linux/mount.h>
 #include <linux/wait.h>
