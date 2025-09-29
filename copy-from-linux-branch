@@ -1,0 +1,48 @@
+#!/bin/bash
+
+set -e
+
+basedir=$(realpath $(dirname $0))
+echo "basedir=${basedir}"
+
+run_cmd()
+{
+    echo "Running: $@"
+    eval $@
+}
+
+prog=$(basename $0)
+dirname=$(readlink -f $0)
+dirname=$(dirname  $dirname)
+
+if [[ -z "$1" || "$1" == "-h"  ]]; then
+    echo "This is going to copy fuse files from <linux> to ${dirname}"
+    echo
+    echo "Usage: ${prog} <path/to/linux>"
+    echo
+    exit 1
+fi
+
+linux="$1"
+full_version="$2"
+if [ -z "${full_version}" ]; then
+    exit 1
+fi
+
+mkdir -p  src/${full_version}
+pushd src/${full_version}
+run_cmd cp -a "${linux}/fs/fuse/*.{c,h}" .
+rm -f *.mod.c
+run_cmd cp -a ${basedir}/Makefile.fuse Makefile
+
+#rename to redfs.h to avoid loading accidentally the system fuse.h
+run_cmd cp -a "${linux}/include/uapi/linux/fuse.h" .
+
+# renaming fuse.h to redfs.h requires rename in source files as well
+sed -i -e 's#<linux\/fuse\.h>#"fuse.h"#g' *.{c,h}
+
+#enable uring by default
+sed -i -e 's#mostly enable_uring;#mostly enable_uring = true;#' dev_uring.c
+
+popd
+
