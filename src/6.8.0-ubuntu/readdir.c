@@ -1,5 +1,5 @@
 /*
-  FUSE: Filesystem in Userspace
+  VFUSE: Filesystem in Userspace
   Copyright (C) 2001-2018  Miklos Szeredi <miklos@szeredi.hu>
 
   This program can be distributed under the terms of the GNU GPL.
@@ -7,33 +7,33 @@
 */
 
 
-#include "fuse_i.h"
+#include "vfuse_i.h"
 #include <linux/iversion.h>
 #include <linux/posix_acl.h>
 #include <linux/pagemap.h>
 #include <linux/highmem.h>
 
-static bool fuse_use_readdirplus(struct inode *dir, struct dir_context *ctx)
+static bool vfuse_use_readdirplus(struct inode *dir, struct dir_context *ctx)
 {
-	struct fuse_conn *fc = get_fuse_conn(dir);
-	struct fuse_inode *fi = get_fuse_inode(dir);
+	struct vfuse_conn *fc = get_vfuse_conn(dir);
+	struct vfuse_inode *fi = get_vfuse_inode(dir);
 
 	if (!fc->do_readdirplus)
 		return false;
 	if (!fc->readdirplus_auto)
 		return true;
-	if (test_and_clear_bit(FUSE_I_ADVISE_RDPLUS, &fi->state))
+	if (test_and_clear_bit(VFUSE_I_ADVISE_RDPLUS, &fi->state))
 		return true;
 	if (ctx->pos == 0)
 		return true;
 	return false;
 }
 
-static void fuse_add_dirent_to_cache(struct file *file,
-				     struct fuse_dirent *dirent, loff_t pos)
+static void vfuse_add_dirent_to_cache(struct file *file,
+				     struct vfuse_dirent *dirent, loff_t pos)
 {
-	struct fuse_inode *fi = get_fuse_inode(file_inode(file));
-	size_t reclen = FUSE_DIRENT_SIZE(dirent);
+	struct vfuse_inode *fi = get_vfuse_inode(file_inode(file));
+	size_t reclen = VFUSE_DIRENT_SIZE(dirent);
 	pgoff_t index;
 	struct page *page;
 	loff_t size;
@@ -91,9 +91,9 @@ unlock:
 	put_page(page);
 }
 
-static void fuse_readdir_cache_end(struct file *file, loff_t pos)
+static void vfuse_readdir_cache_end(struct file *file, loff_t pos)
 {
-	struct fuse_inode *fi = get_fuse_inode(file_inode(file));
+	struct vfuse_inode *fi = get_vfuse_inode(file_inode(file));
 	loff_t end;
 
 	spin_lock(&fi->rdc.lock);
@@ -111,13 +111,13 @@ static void fuse_readdir_cache_end(struct file *file, loff_t pos)
 	truncate_inode_pages(file->f_mapping, end);
 }
 
-static bool fuse_emit(struct file *file, struct dir_context *ctx,
-		      struct fuse_dirent *dirent)
+static bool vfuse_emit(struct file *file, struct dir_context *ctx,
+		      struct vfuse_dirent *dirent)
 {
-	struct fuse_file *ff = file->private_data;
+	struct vfuse_file *ff = file->private_data;
 
 	if (ff->open_flags & FOPEN_CACHE_DIR)
-		fuse_add_dirent_to_cache(file, dirent, ctx->pos);
+		vfuse_add_dirent_to_cache(file, dirent, ctx->pos);
 
 	return dir_emit(ctx, dirent->name, dirent->namelen, dirent->ino,
 			dirent->type);
@@ -126,17 +126,17 @@ static bool fuse_emit(struct file *file, struct dir_context *ctx,
 static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
 			 struct dir_context *ctx)
 {
-	while (nbytes >= FUSE_NAME_OFFSET) {
-		struct fuse_dirent *dirent = (struct fuse_dirent *) buf;
-		size_t reclen = FUSE_DIRENT_SIZE(dirent);
-		if (!dirent->namelen || dirent->namelen > FUSE_NAME_MAX)
+	while (nbytes >= VFUSE_NAME_OFFSET) {
+		struct vfuse_dirent *dirent = (struct vfuse_dirent *) buf;
+		size_t reclen = VFUSE_DIRENT_SIZE(dirent);
+		if (!dirent->namelen || dirent->namelen > VFUSE_NAME_MAX)
 			return -EIO;
 		if (reclen > nbytes)
 			break;
 		if (memchr(dirent->name, '/', dirent->namelen) != NULL)
 			return -EIO;
 
-		if (!fuse_emit(file, ctx, dirent))
+		if (!vfuse_emit(file, ctx, dirent))
 			break;
 
 		buf += reclen;
@@ -147,24 +147,24 @@ static int parse_dirfile(char *buf, size_t nbytes, struct file *file,
 	return 0;
 }
 
-static int fuse_direntplus_link(struct file *file,
-				struct fuse_direntplus *direntplus,
+static int vfuse_direntplus_link(struct file *file,
+				struct vfuse_direntplus *direntplus,
 				u64 attr_version, u64 evict_ctr)
 {
-	struct fuse_entry_out *o = &direntplus->entry_out;
-	struct fuse_dirent *dirent = &direntplus->dirent;
+	struct vfuse_entry_out *o = &direntplus->entry_out;
+	struct vfuse_dirent *dirent = &direntplus->dirent;
 	struct dentry *parent = file->f_path.dentry;
 	struct qstr name = QSTR_INIT(dirent->name, dirent->namelen);
 	struct dentry *dentry;
 	struct dentry *alias;
 	struct inode *dir = d_inode(parent);
-	struct fuse_conn *fc;
+	struct vfuse_conn *fc;
 	struct inode *inode;
 	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(wq);
 
 	if (!o->nodeid) {
 		/*
-		 * Unlike in the case of fuse_lookup, zero nodeid does not mean
+		 * Unlike in the case of vfuse_lookup, zero nodeid does not mean
 		 * ENOENT. Instead, it only means the userspace filesystem did
 		 * not want to return attributes/handle for this entry.
 		 *
@@ -186,10 +186,10 @@ static int fuse_direntplus_link(struct file *file,
 
 	if (invalid_nodeid(o->nodeid))
 		return -EIO;
-	if (fuse_invalid_attr(&o->attr))
+	if (vfuse_invalid_attr(&o->attr))
 		return -EIO;
 
-	fc = get_fuse_conn(dir);
+	fc = get_vfuse_conn(dir);
 
 	name.hash = full_name_hash(parent, name.name, name.len);
 	dentry = d_lookup(parent, &name);
@@ -200,38 +200,38 @@ retry:
 			return PTR_ERR(dentry);
 	}
 	if (!d_in_lookup(dentry)) {
-		struct fuse_inode *fi;
+		struct vfuse_inode *fi;
 		inode = d_inode(dentry);
 		if (inode && get_node_id(inode) != o->nodeid)
 			inode = NULL;
 		if (!inode ||
-		    fuse_stale_inode(inode, o->generation, &o->attr)) {
+		    vfuse_stale_inode(inode, o->generation, &o->attr)) {
 			if (inode)
-				fuse_make_bad(inode);
+				vfuse_make_bad(inode);
 			d_invalidate(dentry);
 			dput(dentry);
 			goto retry;
 		}
-		if (fuse_is_bad(inode)) {
+		if (vfuse_is_bad(inode)) {
 			dput(dentry);
 			return -EIO;
 		}
 
-		fi = get_fuse_inode(inode);
+		fi = get_vfuse_inode(inode);
 		spin_lock(&fi->lock);
 		fi->nlookup++;
 		spin_unlock(&fi->lock);
 
 		forget_all_cached_acls(inode);
-		fuse_change_attributes(inode, &o->attr, NULL,
+		vfuse_change_attributes(inode, &o->attr, NULL,
 				       ATTR_TIMEOUT(o),
 				       attr_version);
 		/*
-		 * The other branch comes via fuse_iget()
+		 * The other branch comes via vfuse_iget()
 		 * which bumps nlookup inside
 		 */
 	} else {
-		inode = fuse_iget(dir->i_sb, o->nodeid, o->generation,
+		inode = vfuse_iget(dir->i_sb, o->nodeid, o->generation,
 				  &o->attr, ATTR_TIMEOUT(o),
 				  attr_version, evict_ctr);
 		if (!inode)
@@ -245,7 +245,7 @@ retry:
 		}
 		if (IS_ERR(dentry)) {
 			if (!IS_ERR(inode)) {
-				struct fuse_inode *fi = get_fuse_inode(inode);
+				struct vfuse_inode *fi = get_vfuse_inode(inode);
 
 				spin_lock(&fi->lock);
 				fi->nlookup--;
@@ -255,23 +255,23 @@ retry:
 		}
 	}
 	if (fc->readdirplus_auto)
-		set_bit(FUSE_I_INIT_RDPLUS, &get_fuse_inode(inode)->state);
-	fuse_change_entry_timeout(dentry, o);
+		set_bit(VFUSE_I_INIT_RDPLUS, &get_vfuse_inode(inode)->state);
+	vfuse_change_entry_timeout(dentry, o);
 
 	dput(dentry);
 	return 0;
 }
 
-static void fuse_force_forget(struct file *file, u64 nodeid)
+static void vfuse_force_forget(struct file *file, u64 nodeid)
 {
 	struct inode *inode = file_inode(file);
-	struct fuse_mount *fm = get_fuse_mount(inode);
-	struct fuse_forget_in inarg;
-	FUSE_ARGS(args);
+	struct vfuse_mount *fm = get_vfuse_mount(inode);
+	struct vfuse_forget_in inarg;
+	VFUSE_ARGS(args);
 
 	memset(&inarg, 0, sizeof(inarg));
 	inarg.nlookup = 1;
-	args.opcode = FUSE_FORGET;
+	args.opcode = VFUSE_FORGET;
 	args.nodeid = nodeid;
 	args.in_numargs = 1;
 	args.in_args[0].size = sizeof(inarg);
@@ -279,7 +279,7 @@ static void fuse_force_forget(struct file *file, u64 nodeid)
 	args.force = true;
 	args.noreply = true;
 
-	fuse_simple_request(fm, &args);
+	vfuse_simple_request(fm, &args);
 	/* ignore errors */
 }
 
@@ -287,18 +287,18 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
 			     struct dir_context *ctx, u64 attr_version,
 			     u64 evict_ctr)
 {
-	struct fuse_direntplus *direntplus;
-	struct fuse_dirent *dirent;
+	struct vfuse_direntplus *direntplus;
+	struct vfuse_dirent *dirent;
 	size_t reclen;
 	int over = 0;
 	int ret;
 
-	while (nbytes >= FUSE_NAME_OFFSET_DIRENTPLUS) {
-		direntplus = (struct fuse_direntplus *) buf;
+	while (nbytes >= VFUSE_NAME_OFFSET_DIRENTPLUS) {
+		direntplus = (struct vfuse_direntplus *) buf;
 		dirent = &direntplus->dirent;
-		reclen = FUSE_DIRENTPLUS_SIZE(direntplus);
+		reclen = VFUSE_DIRENTPLUS_SIZE(direntplus);
 
-		if (!dirent->namelen || dirent->namelen > FUSE_NAME_MAX)
+		if (!dirent->namelen || dirent->namelen > VFUSE_NAME_MAX)
 			return -EIO;
 		if (reclen > nbytes)
 			break;
@@ -312,7 +312,7 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
 			   we need to send a FORGET for each of those
 			   which we did not link.
 			*/
-			over = !fuse_emit(file, ctx, dirent);
+			over = !vfuse_emit(file, ctx, dirent);
 			if (!over)
 				ctx->pos = dirent->off;
 		}
@@ -320,23 +320,23 @@ static int parse_dirplusfile(char *buf, size_t nbytes, struct file *file,
 		buf += reclen;
 		nbytes -= reclen;
 
-		ret = fuse_direntplus_link(file, direntplus, attr_version, evict_ctr);
+		ret = vfuse_direntplus_link(file, direntplus, attr_version, evict_ctr);
 		if (ret)
-			fuse_force_forget(file, direntplus->entry_out.nodeid);
+			vfuse_force_forget(file, direntplus->entry_out.nodeid);
 	}
 
 	return 0;
 }
 
-static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
+static int vfuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 {
 	int plus;
 	ssize_t res;
 	struct inode *inode = file_inode(file);
-	struct fuse_mount *fm = get_fuse_mount(inode);
-	struct fuse_conn *fc = fm->fc;
-	struct fuse_io_args ia = {};
-	struct fuse_args *args = &ia.ap.args;
+	struct vfuse_mount *fm = get_vfuse_mount(inode);
+	struct vfuse_conn *fc = fm->fc;
+	struct vfuse_io_args ia = {};
+	struct vfuse_args *args = &ia.ap.args;
 	void *buf;
 	size_t bufsize = fc->max_pages << PAGE_SHIFT;
 	u64 attr_version = 0, evict_ctr = 0;
@@ -348,23 +348,23 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 
 	args->out_args[0].value = buf;
 
-	plus = fuse_use_readdirplus(inode, ctx);
+	plus = vfuse_use_readdirplus(inode, ctx);
 	if (plus) {
-		attr_version = fuse_get_attr_version(fm->fc);
-		evict_ctr = fuse_get_evict_ctr(fm->fc);
-		fuse_read_args_fill(&ia, file, ctx->pos, bufsize, FUSE_READDIRPLUS);
+		attr_version = vfuse_get_attr_version(fm->fc);
+		evict_ctr = vfuse_get_evict_ctr(fm->fc);
+		vfuse_read_args_fill(&ia, file, ctx->pos, bufsize, VFUSE_READDIRPLUS);
 	} else {
-		fuse_read_args_fill(&ia, file, ctx->pos, bufsize, FUSE_READDIR);
+		vfuse_read_args_fill(&ia, file, ctx->pos, bufsize, VFUSE_READDIR);
 	}
-	locked = fuse_lock_inode(inode);
-	res = fuse_simple_request(fm, args);
-	fuse_unlock_inode(inode, locked);
+	locked = vfuse_lock_inode(inode);
+	res = vfuse_simple_request(fm, args);
+	vfuse_unlock_inode(inode, locked);
 	if (res >= 0) {
 		if (!res) {
-			struct fuse_file *ff = file->private_data;
+			struct vfuse_file *ff = file->private_data;
 
 			if (ff->open_flags & FOPEN_CACHE_DIR)
-				fuse_readdir_cache_end(file, ctx->pos);
+				vfuse_readdir_cache_end(file, ctx->pos);
 		} else if (plus) {
 			res = parse_dirplusfile(buf, res, file, ctx, attr_version,
 						evict_ctr);
@@ -374,37 +374,37 @@ static int fuse_readdir_uncached(struct file *file, struct dir_context *ctx)
 	}
 
 	kvfree(buf);
-	fuse_invalidate_atime(inode);
+	vfuse_invalidate_atime(inode);
 	return res;
 }
 
-enum fuse_parse_result {
+enum vfuse_parse_result {
 	FOUND_ERR = -1,
 	FOUND_NONE = 0,
 	FOUND_SOME,
 	FOUND_ALL,
 };
 
-static enum fuse_parse_result fuse_parse_cache(struct fuse_file *ff,
+static enum vfuse_parse_result vfuse_parse_cache(struct vfuse_file *ff,
 					       void *addr, unsigned int size,
 					       struct dir_context *ctx)
 {
 	unsigned int offset = ff->readdir.cache_off & ~PAGE_MASK;
-	enum fuse_parse_result res = FOUND_NONE;
+	enum vfuse_parse_result res = FOUND_NONE;
 
 	WARN_ON(offset >= size);
 
 	for (;;) {
-		struct fuse_dirent *dirent = addr + offset;
+		struct vfuse_dirent *dirent = addr + offset;
 		unsigned int nbytes = size - offset;
 		size_t reclen;
 
-		if (nbytes < FUSE_NAME_OFFSET || !dirent->namelen)
+		if (nbytes < VFUSE_NAME_OFFSET || !dirent->namelen)
 			break;
 
-		reclen = FUSE_DIRENT_SIZE(dirent); /* derefs ->namelen */
+		reclen = VFUSE_DIRENT_SIZE(dirent); /* derefs ->namelen */
 
-		if (WARN_ON(dirent->namelen > FUSE_NAME_MAX))
+		if (WARN_ON(dirent->namelen > VFUSE_NAME_MAX))
 			return FOUND_ERR;
 		if (WARN_ON(reclen > nbytes))
 			return FOUND_ERR;
@@ -427,9 +427,9 @@ static enum fuse_parse_result fuse_parse_cache(struct fuse_file *ff,
 	return res;
 }
 
-static void fuse_rdc_reset(struct inode *inode)
+static void vfuse_rdc_reset(struct inode *inode)
 {
-	struct fuse_inode *fi = get_fuse_inode(inode);
+	struct vfuse_inode *fi = get_vfuse_inode(inode);
 
 	fi->rdc.cached = false;
 	fi->rdc.version++;
@@ -439,13 +439,13 @@ static void fuse_rdc_reset(struct inode *inode)
 
 #define UNCACHED 1
 
-static int fuse_readdir_cached(struct file *file, struct dir_context *ctx)
+static int vfuse_readdir_cached(struct file *file, struct dir_context *ctx)
 {
-	struct fuse_file *ff = file->private_data;
+	struct vfuse_file *ff = file->private_data;
 	struct inode *inode = file_inode(file);
-	struct fuse_conn *fc = get_fuse_conn(inode);
-	struct fuse_inode *fi = get_fuse_inode(inode);
-	enum fuse_parse_result res;
+	struct vfuse_conn *fc = get_vfuse_conn(inode);
+	struct vfuse_inode *fi = get_vfuse_inode(inode);
+	enum vfuse_parse_result res;
 	pgoff_t index;
 	unsigned int size;
 	struct page *page;
@@ -462,7 +462,7 @@ static int fuse_readdir_cached(struct file *file, struct dir_context *ctx)
 	 * cache; both cases require an up-to-date mtime value.
 	 */
 	if (!ctx->pos && fc->auto_inval_data) {
-		int err = fuse_update_attributes(inode, file, STATX_MTIME);
+		int err = vfuse_update_attributes(inode, file, STATX_MTIME);
 
 		if (err)
 			return err;
@@ -490,7 +490,7 @@ retry_locked:
 
 		if (inode_peek_iversion(inode) != fi->rdc.iversion ||
 		    !timespec64_equal(&fi->rdc.mtime, &mtime)) {
-			fuse_rdc_reset(inode);
+			vfuse_rdc_reset(inode);
 			goto retry_locked;
 		}
 	}
@@ -538,7 +538,7 @@ retry_locked:
 		 * Uh-oh: page gone missing, cache is useless
 		 */
 		if (fi->rdc.version == ff->readdir.version)
-			fuse_rdc_reset(inode);
+			vfuse_rdc_reset(inode);
 		goto retry_locked;
 	}
 
@@ -556,7 +556,7 @@ retry_locked:
 	 * the page lock.
 	 */
 	addr = kmap_local_page(page);
-	res = fuse_parse_cache(ff, addr, size, ctx);
+	res = vfuse_parse_cache(ff, addr, size, ctx);
 	kunmap_local(addr);
 	unlock_page(page);
 	put_page(page);
@@ -581,22 +581,22 @@ retry_locked:
 	return res == FOUND_SOME ? 0 : UNCACHED;
 }
 
-int fuse_readdir(struct file *file, struct dir_context *ctx)
+int vfuse_readdir(struct file *file, struct dir_context *ctx)
 {
-	struct fuse_file *ff = file->private_data;
+	struct vfuse_file *ff = file->private_data;
 	struct inode *inode = file_inode(file);
 	int err;
 
-	if (fuse_is_bad(inode))
+	if (vfuse_is_bad(inode))
 		return -EIO;
 
 	mutex_lock(&ff->readdir.lock);
 
 	err = UNCACHED;
 	if (ff->open_flags & FOPEN_CACHE_DIR)
-		err = fuse_readdir_cached(file, ctx);
+		err = vfuse_readdir_cached(file, ctx);
 	if (err == UNCACHED)
-		err = fuse_readdir_uncached(file, ctx);
+		err = vfuse_readdir_uncached(file, ctx);
 
 	mutex_unlock(&ff->readdir.lock);
 

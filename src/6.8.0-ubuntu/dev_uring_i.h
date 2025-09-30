@@ -1,30 +1,30 @@
 /* SPDX-License-Identifier: GPL-2.0
  *
- * FUSE: Filesystem in Userspace
+ * VFUSE: Filesystem in Userspace
  * Copyright (c) 2023-2024 DataDirect Networks.
  */
 
-#ifndef _FS_FUSE_DEV_URING_I_H
-#define _FS_FUSE_DEV_URING_I_H
+#ifndef _FS_VFUSE_DEV_URING_I_H
+#define _FS_VFUSE_DEV_URING_I_H
 
-#include "fuse_i.h"
+#include "vfuse_i.h"
 
-#ifdef CONFIG_FUSE_IO_URING
+#ifdef CONFIG_VFUSE_IO_URING
 
-#define FUSE_URING_TEARDOWN_TIMEOUT (5 * HZ)
-#define FUSE_URING_TEARDOWN_INTERVAL (HZ/20)
+#define VFUSE_URING_TEARDOWN_TIMEOUT (5 * HZ)
+#define VFUSE_URING_TEARDOWN_INTERVAL (HZ/20)
 
-enum fuse_ring_req_state {
+enum vfuse_ring_req_state {
 	FRRS_INVALID = 0,
 
 	/* The ring entry received from userspace and it is being processed */
 	FRRS_COMMIT,
 
-	/* The ring entry is waiting for new fuse requests */
+	/* The ring entry is waiting for new vfuse requests */
 	FRRS_AVAILABLE,
 
-	/* The ring entry got assigned a fuse req */
-	FRRS_FUSE_REQ,
+	/* The ring entry got assigned a vfuse req */
+	FRRS_VFUSE_REQ,
 
 	/* The ring entry is in or on the way to user space */
 	FRRS_USERSPACE,
@@ -36,10 +36,10 @@ enum fuse_ring_req_state {
 	FRRS_RELEASED,
 };
 
-/** A fuse ring entry, part of the ring queue */
-struct fuse_ring_ent {
+/** A vfuse ring entry, part of the ring queue */
+struct vfuse_ring_ent {
 	/* userspace buffer */
-	struct fuse_uring_req_header __user *headers;
+	struct vfuse_uring_req_header __user *headers;
 	struct page **header_pages;
 	int nr_header_pages;
 	void __user *payload;
@@ -47,7 +47,7 @@ struct fuse_ring_ent {
 	int nr_payload_pages;
 
 	/* the ring queue that owns the request */
-	struct fuse_ring_queue *queue;
+	struct vfuse_ring_queue *queue;
 
 	/* fields below are protected by queue->lock */
 
@@ -55,17 +55,17 @@ struct fuse_ring_ent {
 
 	struct list_head list;
 
-	enum fuse_ring_req_state state;
+	enum vfuse_ring_req_state state;
 
-	struct fuse_req *fuse_req;
+	struct vfuse_req *vfuse_req;
 };
 
-struct fuse_ring_queue {
+struct vfuse_ring_queue {
 	/*
-	 * back pointer to the main fuse uring structure that holds this
+	 * back pointer to the main vfuse uring structure that holds this
 	 * queue
 	 */
-	struct fuse_ring *ring;
+	struct vfuse_ring *ring;
 
 	/* queue id, corresponds to the cpu core */
 	unsigned int qid;
@@ -76,7 +76,7 @@ struct fuse_ring_queue {
 	 */
 	spinlock_t lock;
 
-	/* available ring entries (struct fuse_ring_ent) */
+	/* available ring entries (struct vfuse_ring_ent) */
 	struct list_head ent_avail_queue;
 
 	/*
@@ -92,13 +92,13 @@ struct fuse_ring_queue {
 	/* entries that are released */
 	struct list_head ent_released;
 
-	/* fuse requests waiting for an entry slot */
-	struct list_head fuse_req_queue;
+	/* vfuse requests waiting for an entry slot */
+	struct list_head vfuse_req_queue;
 
-	/* background fuse requests */
-	struct list_head fuse_req_bg_queue;
+	/* background vfuse requests */
+	struct list_head vfuse_req_bg_queue;
 
-	struct fuse_pqueue fpq;
+	struct vfuse_pqueue fpq;
 
 	unsigned int active_background;
 
@@ -109,9 +109,9 @@ struct fuse_ring_queue {
  * Describes if uring is for communication and holds alls the data needed
  * for uring communication
  */
-struct fuse_ring {
+struct vfuse_ring {
 	/* back pointer */
-	struct fuse_conn *fc;
+	struct vfuse_conn *fc;
 
 	/* number of ring queues */
 	size_t nr_queues;
@@ -119,7 +119,7 @@ struct fuse_ring {
 	/* maximum payload/arg size */
 	size_t max_payload_sz;
 
-	struct fuse_ring_queue **queues;
+	struct vfuse_ring_queue **queues;
 
 	/*
 	 * Log ring entry states on stop when entries cannot be released
@@ -139,71 +139,71 @@ struct fuse_ring {
 	bool ready;
 };
 
-bool fuse_uring_enabled(void);
-void fuse_uring_destruct(struct fuse_conn *fc);
-void fuse_uring_stop_queues(struct fuse_ring *ring);
-void fuse_uring_abort_end_requests(struct fuse_ring *ring);
-int fuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags);
-void fuse_uring_queue_fuse_req(struct fuse_iqueue *fiq, struct fuse_req *req);
-bool fuse_uring_queue_bq_req(struct fuse_req *req);
-bool fuse_uring_remove_pending_req(struct fuse_req *req);
+bool vfuse_uring_enabled(void);
+void vfuse_uring_destruct(struct vfuse_conn *fc);
+void vfuse_uring_stop_queues(struct vfuse_ring *ring);
+void vfuse_uring_abort_end_requests(struct vfuse_ring *ring);
+int vfuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags);
+void vfuse_uring_queue_vfuse_req(struct vfuse_iqueue *fiq, struct vfuse_req *req);
+bool vfuse_uring_queue_bq_req(struct vfuse_req *req);
+bool vfuse_uring_remove_pending_req(struct vfuse_req *req);
 
-static inline void fuse_uring_abort(struct fuse_conn *fc)
+static inline void vfuse_uring_abort(struct vfuse_conn *fc)
 {
-	struct fuse_ring *ring = fc->ring;
+	struct vfuse_ring *ring = fc->ring;
 
 	if (ring == NULL)
 		return;
 
 	if (atomic_read(&ring->queue_refs) > 0) {
-		fuse_uring_abort_end_requests(ring);
-		fuse_uring_stop_queues(ring);
+		vfuse_uring_abort_end_requests(ring);
+		vfuse_uring_stop_queues(ring);
 	}
 }
 
-static inline void fuse_uring_wait_stopped_queues(struct fuse_conn *fc)
+static inline void vfuse_uring_wait_stopped_queues(struct vfuse_conn *fc)
 {
-	struct fuse_ring *ring = fc->ring;
+	struct vfuse_ring *ring = fc->ring;
 
 	if (ring)
 		wait_event(ring->stop_waitq,
 			   atomic_read(&ring->queue_refs) == 0);
 }
 
-static inline bool fuse_uring_ready(struct fuse_conn *fc)
+static inline bool vfuse_uring_ready(struct vfuse_conn *fc)
 {
 	return fc->ring && fc->ring->ready;
 }
 
-#else /* CONFIG_FUSE_IO_URING */
+#else /* CONFIG_VFUSE_IO_URING */
 
-static inline void fuse_uring_destruct(struct fuse_conn *fc)
+static inline void vfuse_uring_destruct(struct vfuse_conn *fc)
 {
 }
 
-static inline bool fuse_uring_enabled(void)
-{
-	return false;
-}
-
-static inline void fuse_uring_abort(struct fuse_conn *fc)
-{
-}
-
-static inline void fuse_uring_wait_stopped_queues(struct fuse_conn *fc)
-{
-}
-
-static inline bool fuse_uring_ready(struct fuse_conn *fc)
+static inline bool vfuse_uring_enabled(void)
 {
 	return false;
 }
 
-static inline bool fuse_uring_remove_pending_req(struct fuse_req *req)
+static inline void vfuse_uring_abort(struct vfuse_conn *fc)
+{
+}
+
+static inline void vfuse_uring_wait_stopped_queues(struct vfuse_conn *fc)
+{
+}
+
+static inline bool vfuse_uring_ready(struct vfuse_conn *fc)
 {
 	return false;
 }
 
-#endif /* CONFIG_FUSE_IO_URING */
+static inline bool vfuse_uring_remove_pending_req(struct vfuse_req *req)
+{
+	return false;
+}
 
-#endif /* _FS_FUSE_DEV_URING_I_H */
+#endif /* CONFIG_VFUSE_IO_URING */
+
+#endif /* _FS_VFUSE_DEV_URING_I_H */

@@ -33,16 +33,41 @@ mkdir -p  src/${full_version}
 pushd src/${full_version}
 run_cmd cp -a "${linux}/fs/fuse/*.{c,h}" .
 rm -f *.mod.c
-run_cmd cp -a ${basedir}/Makefile.fuse Makefile
-
-#rename to redfs.h to avoid loading accidentally the system fuse.h
-run_cmd cp -a "${linux}/include/uapi/linux/fuse.h" .
-
-# renaming fuse.h to redfs.h requires rename in source files as well
-sed -i -e 's#<linux\/fuse\.h>#"fuse.h"#g' *.{c,h}
 
 #enable uring by default
 sed -i -e 's#mostly enable_uring;#mostly enable_uring = true;#' dev_uring.c
 
-popd
+# Create an "vfuse" moduel for ubuntu
+if [[ ${full_version} =~ "ubuntu" ]]; then
+    run_cmd cp -a ${basedir}/Makefile.vfuse Makefile
 
+    # Rename to vfuse.h to avoid loading accidentally the system fuse.h
+    run_cmd cp -a "${linux}/include/uapi/linux/fuse.h" vfuse.h
+
+    # Rename all symbols and defines
+    mv fuse_i.h vfuse_i.h
+    mv fuse_dev_i.h vfuse_dev_i.h
+    mv fuse_trace.h vfuse_trace.h
+    sed -i -e 's#fuse#vfuse#g' *.{c,h}
+    sed -i -e 's#FUSE#VFUSE#g' *.{c,h}
+
+    # Renaming fuse.h to vfuse.h requires rename in source files as well
+    sed -i -e 's#<linux\/vfuse\.h>#"vfuse.h"#g' *.{c,h}
+
+    # Rename back a wrong renames
+    sed -i -e 's#ECONNREVFUSED#ECONNREFUSED#g' *.{c,h}
+    sed -i -e 's#CONFIG_VFUSE_DAX#CONFIG_FUSE_DAX#g' *.{c,h}
+
+    # We do not have out our minor - dynamic is ok
+    sed -i -e 's#VFUSE_MINOR#MISC_DYNAMIC_MINOR#g' *.{c,h}
+
+    # We need to use the fuse super magic, our own is
+    # not desirable
+    sed -i -e 's#VFUSE_SUPER_MAGIC#FUSE_SUPER_MAGIC#g' *.{c,h}
+else
+    run_cmd cp -a ${basedir}/Makefile.fuse Makefile
+    run_cmd cp -a "${linux}/include/uapi/linux/fuse.h" .
+    sed -i -e 's#<linux\/fuse\.h>#"fuse.h"#g' *.{c,h}
+fi
+
+popd

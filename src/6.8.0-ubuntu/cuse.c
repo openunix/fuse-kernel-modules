@@ -6,19 +6,19 @@
  * Copyright (C) 2008-2009  Tejun Heo <tj@kernel.org>
  *
  * CUSE enables character devices to be implemented from userland much
- * like FUSE allows filesystems.  On initialization /dev/cuse is
+ * like VFUSE allows filesystems.  On initialization /dev/cuse is
  * created.  By opening the file and replying to the CUSE_INIT request
  * userland CUSE server can create a character device.  After that the
- * operation is very similar to FUSE.
+ * operation is very similar to VFUSE.
  *
  * A CUSE instance involves the following objects.
  *
- * cuse_conn	: contains fuse_conn and serves as bonding structure
+ * cuse_conn	: contains vfuse_conn and serves as bonding structure
  * channel	: file handle connected to the userland CUSE server
  * cdev		: the implemented character device
  * dev		: generic device for cdev
  *
- * Note that 'channel' is what 'dev' is in FUSE.  As CUSE deals with
+ * Note that 'channel' is what 'dev' is in VFUSE.  As CUSE deals with
  * devices, it's called 'channel' to reduce confusion.
  *
  * channel determines when the character device dies.  When channel is
@@ -34,7 +34,7 @@
 
 #define pr_fmt(fmt) "CUSE: " fmt
 
-#include "fuse.h"
+#include "vfuse.h"
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/file.h>
@@ -51,14 +51,14 @@
 #include <linux/uio.h>
 #include <linux/user_namespace.h>
 
-#include "fuse_i.h"
+#include "vfuse_i.h"
 
 #define CUSE_CONNTBL_LEN	64
 
 struct cuse_conn {
 	struct list_head	list;	/* linked on cuse_conntbl */
-	struct fuse_mount	fm;	/* Dummy mount referencing fc */
-	struct fuse_conn	fc;	/* fuse connection */
+	struct vfuse_mount	fm;	/* Dummy mount referencing fc */
+	struct vfuse_conn	fc;	/* vfuse connection */
 	struct cdev		*cdev;	/* associated character device */
 	struct device		*dev;	/* device representing @cdev */
 
@@ -70,7 +70,7 @@ static DEFINE_MUTEX(cuse_lock);		/* protects registration */
 static struct list_head cuse_conntbl[CUSE_CONNTBL_LEN];
 static struct class *cuse_class;
 
-static struct cuse_conn *fc_to_cc(struct fuse_conn *fc)
+static struct cuse_conn *fc_to_cc(struct vfuse_conn *fc)
 {
 	return container_of(fc, struct cuse_conn, fc);
 }
@@ -86,29 +86,29 @@ static struct list_head *cuse_conntbl_head(dev_t devt)
  *
  * These are file operations for the character device.
  *
- * On open, CUSE opens a file from the FUSE mnt and stores it to
- * private_data of the open file.  All other ops call FUSE ops on the
- * FUSE file.
+ * On open, CUSE opens a file from the VFUSE mnt and stores it to
+ * private_data of the open file.  All other ops call VFUSE ops on the
+ * VFUSE file.
  */
 
 static ssize_t cuse_read_iter(struct kiocb *kiocb, struct iov_iter *to)
 {
-	struct fuse_io_priv io = FUSE_IO_PRIV_SYNC(kiocb);
+	struct vfuse_io_priv io = VFUSE_IO_PRIV_SYNC(kiocb);
 	loff_t pos = 0;
 
-	return fuse_direct_io(&io, to, &pos, FUSE_DIO_CUSE);
+	return vfuse_direct_io(&io, to, &pos, VFUSE_DIO_CUSE);
 }
 
 static ssize_t cuse_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
-	struct fuse_io_priv io = FUSE_IO_PRIV_SYNC(kiocb);
+	struct vfuse_io_priv io = VFUSE_IO_PRIV_SYNC(kiocb);
 	loff_t pos = 0;
 	/*
 	 * No locking or generic_write_checks(), the server is
 	 * responsible for locking and sanity checks.
 	 */
-	return fuse_direct_io(&io, from, &pos,
-			      FUSE_DIO_WRITE | FUSE_DIO_CUSE);
+	return vfuse_direct_io(&io, from, &pos,
+			      VFUSE_DIO_WRITE | VFUSE_DIO_CUSE);
 }
 
 static int cuse_open(struct inode *inode, struct file *file)
@@ -121,7 +121,7 @@ static int cuse_open(struct inode *inode, struct file *file)
 	mutex_lock(&cuse_lock);
 	list_for_each_entry(pos, cuse_conntbl_head(devt), list)
 		if (pos->dev->devt == devt) {
-			fuse_conn_get(&pos->fc);
+			vfuse_conn_get(&pos->fc);
 			cc = pos;
 			break;
 		}
@@ -135,19 +135,19 @@ static int cuse_open(struct inode *inode, struct file *file)
 	 * Generic permission check is already done against the chrdev
 	 * file, proceed to open.
 	 */
-	rc = fuse_do_open(&cc->fm, 0, file, 0);
+	rc = vfuse_do_open(&cc->fm, 0, file, 0);
 	if (rc)
-		fuse_conn_put(&cc->fc);
+		vfuse_conn_put(&cc->fc);
 	return rc;
 }
 
 static int cuse_release(struct inode *inode, struct file *file)
 {
-	struct fuse_file *ff = file->private_data;
-	struct fuse_mount *fm = ff->fm;
+	struct vfuse_file *ff = file->private_data;
+	struct vfuse_mount *fm = ff->fm;
 
-	fuse_sync_release(NULL, ff, file->f_flags);
-	fuse_conn_put(fm->fc);
+	vfuse_sync_release(NULL, ff, file->f_flags);
+	vfuse_conn_put(fm->fc);
 
 	return 0;
 }
@@ -155,27 +155,27 @@ static int cuse_release(struct inode *inode, struct file *file)
 static long cuse_file_ioctl(struct file *file, unsigned int cmd,
 			    unsigned long arg)
 {
-	struct fuse_file *ff = file->private_data;
+	struct vfuse_file *ff = file->private_data;
 	struct cuse_conn *cc = fc_to_cc(ff->fm->fc);
 	unsigned int flags = 0;
 
 	if (cc->unrestricted_ioctl)
-		flags |= FUSE_IOCTL_UNRESTRICTED;
+		flags |= VFUSE_IOCTL_UNRESTRICTED;
 
-	return fuse_do_ioctl(file, cmd, arg, flags);
+	return vfuse_do_ioctl(file, cmd, arg, flags);
 }
 
 static long cuse_file_compat_ioctl(struct file *file, unsigned int cmd,
 				   unsigned long arg)
 {
-	struct fuse_file *ff = file->private_data;
+	struct vfuse_file *ff = file->private_data;
 	struct cuse_conn *cc = fc_to_cc(ff->fm->fc);
-	unsigned int flags = FUSE_IOCTL_COMPAT;
+	unsigned int flags = VFUSE_IOCTL_COMPAT;
 
 	if (cc->unrestricted_ioctl)
-		flags |= FUSE_IOCTL_UNRESTRICTED;
+		flags |= VFUSE_IOCTL_UNRESTRICTED;
 
-	return fuse_do_ioctl(file, cmd, arg, flags);
+	return vfuse_do_ioctl(file, cmd, arg, flags);
 }
 
 static const struct file_operations cuse_frontend_fops = {
@@ -186,7 +186,7 @@ static const struct file_operations cuse_frontend_fops = {
 	.release		= cuse_release,
 	.unlocked_ioctl		= cuse_file_ioctl,
 	.compat_ioctl		= cuse_file_compat_ioctl,
-	.poll			= fuse_file_poll,
+	.poll			= vfuse_file_poll,
 	.llseek		= noop_llseek,
 };
 
@@ -300,11 +300,11 @@ static void cuse_gendev_release(struct device *dev)
 }
 
 struct cuse_init_args {
-	struct fuse_args_pages ap;
+	struct vfuse_args_pages ap;
 	struct cuse_init_in in;
 	struct cuse_init_out out;
 	struct page *page;
-	struct fuse_page_desc desc;
+	struct vfuse_page_desc desc;
 };
 
 /**
@@ -314,12 +314,12 @@ struct cuse_init_args {
  * required data structures for it.  Please read the comment at the
  * top of this file for high level overview.
  */
-static void cuse_process_init_reply(struct fuse_mount *fm,
-				    struct fuse_args *args, int error)
+static void cuse_process_init_reply(struct vfuse_mount *fm,
+				    struct vfuse_args *args, int error)
 {
-	struct fuse_conn *fc = fm->fc;
+	struct vfuse_conn *fc = fm->fc;
 	struct cuse_init_args *ia = container_of(args, typeof(*ia), ap.args);
-	struct fuse_args_pages *ap = &ia->ap;
+	struct vfuse_args_pages *ap = &ia->ap;
 	struct cuse_conn *cc = fc_to_cc(fc), *pos;
 	struct cuse_init_out *arg = &ia->out;
 	struct page *page = ap->pages[0];
@@ -329,7 +329,7 @@ static void cuse_process_init_reply(struct fuse_mount *fm,
 	dev_t devt;
 	int rc, i;
 
-	if (error || arg->major != FUSE_KERNEL_VERSION || arg->minor < 11)
+	if (error || arg->major != VFUSE_KERNEL_VERSION || arg->minor < 11)
 		goto err;
 
 	fc->minor = arg->minor;
@@ -418,7 +418,7 @@ err_unlock:
 err_region:
 	unregister_chrdev_region(devt, 1);
 err:
-	fuse_abort_conn(fc);
+	vfuse_abort_conn(fc);
 	goto out;
 }
 
@@ -426,9 +426,9 @@ static int cuse_send_init(struct cuse_conn *cc)
 {
 	int rc;
 	struct page *page;
-	struct fuse_mount *fm = &cc->fm;
+	struct vfuse_mount *fm = &cc->fm;
 	struct cuse_init_args *ia;
-	struct fuse_args_pages *ap;
+	struct vfuse_args_pages *ap;
 
 	BUILD_BUG_ON(CUSE_INIT_INFO_MAX > PAGE_SIZE);
 
@@ -442,8 +442,8 @@ static int cuse_send_init(struct cuse_conn *cc)
 		goto err_free_page;
 
 	ap = &ia->ap;
-	ia->in.major = FUSE_KERNEL_VERSION;
-	ia->in.minor = FUSE_KERNEL_MINOR_VERSION;
+	ia->in.major = VFUSE_KERNEL_VERSION;
+	ia->in.minor = VFUSE_KERNEL_MINOR_VERSION;
 	ia->in.flags |= CUSE_UNRESTRICTED_IOCTL;
 	ap->args.opcode = CUSE_INIT;
 	ap->args.in_numargs = 1;
@@ -462,7 +462,7 @@ static int cuse_send_init(struct cuse_conn *cc)
 	ia->desc.length = ap->args.out_args[1].size;
 	ap->args.end = cuse_process_init_reply;
 
-	rc = fuse_simple_background(fm, &ap->args, GFP_KERNEL);
+	rc = vfuse_simple_background(fm, &ap->args, GFP_KERNEL);
 	if (rc) {
 		kfree(ia);
 err_free_page:
@@ -472,7 +472,7 @@ err:
 	return rc;
 }
 
-static void cuse_fc_release(struct fuse_conn *fc)
+static void cuse_fc_release(struct vfuse_conn *fc)
 {
 	kfree(fc_to_cc(fc));
 }
@@ -494,7 +494,7 @@ static void cuse_fc_release(struct fuse_conn *fc)
  */
 static int cuse_channel_open(struct inode *inode, struct file *file)
 {
-	struct fuse_dev *fud;
+	struct vfuse_dev *fud;
 	struct cuse_conn *cc;
 	int rc;
 
@@ -507,12 +507,12 @@ static int cuse_channel_open(struct inode *inode, struct file *file)
 	 * Limit the cuse channel to requests that can
 	 * be represented in file->f_cred->user_ns.
 	 */
-	fuse_conn_init(&cc->fc, &cc->fm, file->f_cred->user_ns,
-		       &fuse_dev_fiq_ops, NULL);
+	vfuse_conn_init(&cc->fc, &cc->fm, file->f_cred->user_ns,
+		       &vfuse_dev_fiq_ops, NULL);
 
 	cc->fc.release = cuse_fc_release;
-	fud = fuse_dev_alloc_install(&cc->fc);
-	fuse_conn_put(&cc->fc);
+	fud = vfuse_dev_alloc_install(&cc->fc);
+	vfuse_conn_put(&cc->fc);
 	if (!fud)
 		return -ENOMEM;
 
@@ -521,7 +521,7 @@ static int cuse_channel_open(struct inode *inode, struct file *file)
 	cc->fc.initialized = 1;
 	rc = cuse_send_init(cc);
 	if (rc) {
-		fuse_dev_free(fud);
+		vfuse_dev_free(fud);
 		return rc;
 	}
 	file->private_data = fud;
@@ -542,7 +542,7 @@ static int cuse_channel_open(struct inode *inode, struct file *file)
  */
 static int cuse_channel_release(struct inode *inode, struct file *file)
 {
-	struct fuse_dev *fud = file->private_data;
+	struct vfuse_dev *fud = file->private_data;
 	struct cuse_conn *cc = fc_to_cc(fud->fc);
 
 	/* remove from the conntbl, no more access from this point on */
@@ -558,7 +558,7 @@ static int cuse_channel_release(struct inode *inode, struct file *file)
 		cdev_del(cc->cdev);
 	}
 
-	return fuse_dev_release(inode, file);
+	return vfuse_dev_release(inode, file);
 }
 
 static struct file_operations cuse_channel_fops; /* initialized during init */
@@ -567,7 +567,7 @@ static struct file_operations cuse_channel_fops; /* initialized during init */
 /**************************************************************************
  * Misc stuff and module initializatiion
  *
- * CUSE exports the same set of attributes to sysfs as fusectl.
+ * CUSE exports the same set of attributes to sysfs as vfusectl.
  */
 
 static ssize_t cuse_class_waiting_show(struct device *dev,
@@ -585,7 +585,7 @@ static ssize_t cuse_class_abort_store(struct device *dev,
 {
 	struct cuse_conn *cc = dev_get_drvdata(dev);
 
-	fuse_abort_conn(&cc->fc);
+	vfuse_abort_conn(&cc->fc);
 	return count;
 }
 static DEVICE_ATTR(abort, 0200, NULL, cuse_class_abort_store);
@@ -614,12 +614,12 @@ static int __init cuse_init(void)
 	for (i = 0; i < CUSE_CONNTBL_LEN; i++)
 		INIT_LIST_HEAD(&cuse_conntbl[i]);
 
-	/* inherit and extend fuse_dev_operations */
-	cuse_channel_fops		= fuse_dev_operations;
+	/* inherit and extend vfuse_dev_operations */
+	cuse_channel_fops		= vfuse_dev_operations;
 	cuse_channel_fops.owner		= THIS_MODULE;
 	cuse_channel_fops.open		= cuse_channel_open;
 	cuse_channel_fops.release	= cuse_channel_release;
-	/* CUSE is not prepared for FUSE_DEV_IOC_CLONE */
+	/* CUSE is not prepared for VFUSE_DEV_IOC_CLONE */
 	cuse_channel_fops.unlocked_ioctl	= NULL;
 
 	cuse_class = class_create("cuse");

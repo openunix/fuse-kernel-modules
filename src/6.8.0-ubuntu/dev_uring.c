@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * FUSE: Filesystem in Userspace
+ * VFUSE: Filesystem in Userspace
  * Copyright (c) 2023-2024 DataDirect Networks.
  */
 
-#include "fuse_i.h"
+#include "vfuse_i.h"
 #include "dev_uring_i.h"
-#include "fuse_dev_i.h"
-#include "fuse_trace.h"
+#include "vfuse_dev_i.h"
+#include "vfuse_trace.h"
 
 #include <linux/fs.h>
 #include <linux/io_uring/cmd.h>
@@ -18,9 +18,9 @@ module_param(enable_uring, bool, 0644);
 MODULE_PARM_DESC(enable_uring,
 		 "Enable userspace communication through io-uring");
 
-#define FUSE_URING_IOV_SEGS 2 /* header and payload */
-#define FUSE_RING_HEADER_PG 0
-#define FUSE_RING_PAYLOAD_PG 1
+#define VFUSE_URING_IOV_SEGS 2 /* header and payload */
+#define VFUSE_RING_HEADER_PG 0
+#define VFUSE_RING_PAYLOAD_PG 1
 
 /* redfs only to allow patch backports */
 #define IO_URING_F_TASK_DEAD (1 << 13)
@@ -37,38 +37,38 @@ static inline void io_uring_cmd_private_sz_check(size_t cmd_sz)
 )
 #endif
 
-bool fuse_uring_enabled(void)
+bool vfuse_uring_enabled(void)
 {
 	return enable_uring;
 }
 
-struct fuse_uring_pdu {
-	struct fuse_ring_ent *ent;
+struct vfuse_uring_pdu {
+	struct vfuse_ring_ent *ent;
 };
 
-static const struct fuse_iqueue_ops fuse_io_uring_ops;
+static const struct vfuse_iqueue_ops vfuse_io_uring_ops;
 
 static void uring_cmd_set_ring_ent(struct io_uring_cmd *cmd,
-				   struct fuse_ring_ent *ring_ent)
+				   struct vfuse_ring_ent *ring_ent)
 {
-	struct fuse_uring_pdu *pdu =
-		io_uring_cmd_to_pdu(cmd, struct fuse_uring_pdu);
+	struct vfuse_uring_pdu *pdu =
+		io_uring_cmd_to_pdu(cmd, struct vfuse_uring_pdu);
 
 	pdu->ent = ring_ent;
 }
 
-static struct fuse_ring_ent *uring_cmd_to_ring_ent(struct io_uring_cmd *cmd)
+static struct vfuse_ring_ent *uring_cmd_to_ring_ent(struct io_uring_cmd *cmd)
 {
-	struct fuse_uring_pdu *pdu =
-		io_uring_cmd_to_pdu(cmd, struct fuse_uring_pdu);
+	struct vfuse_uring_pdu *pdu =
+		io_uring_cmd_to_pdu(cmd, struct vfuse_uring_pdu);
 
 	return pdu->ent;
 }
 
-static void fuse_uring_flush_bg(struct fuse_ring_queue *queue)
+static void vfuse_uring_flush_bg(struct vfuse_ring_queue *queue)
 {
-	struct fuse_ring *ring = queue->ring;
-	struct fuse_conn *fc = ring->fc;
+	struct vfuse_ring *ring = queue->ring;
+	struct vfuse_conn *fc = ring->fc;
 
 	lockdep_assert_held(&queue->lock);
 	lockdep_assert_held(&fc->bg_lock);
@@ -81,32 +81,32 @@ static void fuse_uring_flush_bg(struct fuse_ring_queue *queue)
 	 */
 	while ((fc->active_background < fc->max_background ||
 		!queue->active_background) &&
-	       (!list_empty(&queue->fuse_req_bg_queue))) {
-		struct fuse_req *req;
+	       (!list_empty(&queue->vfuse_req_bg_queue))) {
+		struct vfuse_req *req;
 
-		req = list_first_entry(&queue->fuse_req_bg_queue,
-				       struct fuse_req, list);
+		req = list_first_entry(&queue->vfuse_req_bg_queue,
+				       struct vfuse_req, list);
 		fc->active_background++;
 		queue->active_background++;
 
-		list_move_tail(&req->list, &queue->fuse_req_queue);
+		list_move_tail(&req->list, &queue->vfuse_req_queue);
 	}
 }
 
-static void fuse_uring_req_end(struct fuse_ring_ent *ent, struct fuse_req *req,
+static void vfuse_uring_req_end(struct vfuse_ring_ent *ent, struct vfuse_req *req,
 			       int error)
 {
-	struct fuse_ring_queue *queue = ent->queue;
-	struct fuse_ring *ring = queue->ring;
-	struct fuse_conn *fc = ring->fc;
+	struct vfuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring *ring = queue->ring;
+	struct vfuse_conn *fc = ring->fc;
 
 	lockdep_assert_not_held(&queue->lock);
 	spin_lock(&queue->lock);
-	ent->fuse_req = NULL;
+	ent->vfuse_req = NULL;
 	if (test_bit(FR_BACKGROUND, &req->flags)) {
 		queue->active_background--;
 		spin_lock(&fc->bg_lock);
-		fuse_uring_flush_bg(queue);
+		vfuse_uring_flush_bg(queue);
 		spin_unlock(&fc->bg_lock);
 	}
 
@@ -116,30 +116,30 @@ static void fuse_uring_req_end(struct fuse_ring_ent *ent, struct fuse_req *req,
 		req->out.h.error = error;
 
 	clear_bit(FR_SENT, &req->flags);
-	fuse_request_end(req);
+	vfuse_request_end(req);
 }
 
 /* Abort all list queued request on the given ring queue */
-static void fuse_uring_abort_end_queue_requests(struct fuse_ring_queue *queue)
+static void vfuse_uring_abort_end_queue_requests(struct vfuse_ring_queue *queue)
 {
-	struct fuse_req *req;
+	struct vfuse_req *req;
 	LIST_HEAD(req_list);
 
 	spin_lock(&queue->lock);
-	list_for_each_entry(req, &queue->fuse_req_queue, list)
+	list_for_each_entry(req, &queue->vfuse_req_queue, list)
 		clear_bit(FR_PENDING, &req->flags);
-	list_splice_init(&queue->fuse_req_queue, &req_list);
+	list_splice_init(&queue->vfuse_req_queue, &req_list);
 	spin_unlock(&queue->lock);
 
 	/* must not hold queue lock to avoid order issues with fi->lock */
-	fuse_dev_end_requests(&req_list);
+	vfuse_dev_end_requests(&req_list);
 }
 
-void fuse_uring_abort_end_requests(struct fuse_ring *ring)
+void vfuse_uring_abort_end_requests(struct vfuse_ring *ring)
 {
 	int qid;
-	struct fuse_ring_queue *queue;
-	struct fuse_conn *fc = ring->fc;
+	struct vfuse_ring_queue *queue;
+	struct vfuse_conn *fc = ring->fc;
 
 	for (qid = 0; qid < ring->nr_queues; qid++) {
 		queue = READ_ONCE(ring->queues[qid]);
@@ -151,10 +151,10 @@ void fuse_uring_abort_end_requests(struct fuse_ring *ring)
 		WARN_ON_ONCE(ring->fc->max_background != UINT_MAX);
 		spin_lock(&queue->lock);
 		spin_lock(&fc->bg_lock);
-		fuse_uring_flush_bg(queue);
+		vfuse_uring_flush_bg(queue);
 		spin_unlock(&fc->bg_lock);
 		spin_unlock(&queue->lock);
-		fuse_uring_abort_end_queue_requests(queue);
+		vfuse_uring_abort_end_queue_requests(queue);
 	}
 }
 
@@ -173,17 +173,17 @@ static void io_pages_free(struct page ***pages, int npages)
 	*pages = NULL;
 }
 
-void fuse_uring_destruct(struct fuse_conn *fc)
+void vfuse_uring_destruct(struct vfuse_conn *fc)
 {
-	struct fuse_ring *ring = fc->ring;
+	struct vfuse_ring *ring = fc->ring;
 	int qid;
 
 	if (!ring)
 		return;
 
 	for (qid = 0; qid < ring->nr_queues; qid++) {
-		struct fuse_ring_queue *queue = ring->queues[qid];
-		struct fuse_ring_ent *ent, *next;
+		struct vfuse_ring_queue *queue = ring->queues[qid];
+		struct vfuse_ring_ent *ent, *next;
 
 		if (!queue)
 			continue;
@@ -218,23 +218,23 @@ void fuse_uring_destruct(struct fuse_conn *fc)
 /*
  * Basic ring setup for this connection based on the provided configuration
  */
-static struct fuse_ring *fuse_uring_create(struct fuse_conn *fc)
+static struct vfuse_ring *vfuse_uring_create(struct vfuse_conn *fc)
 {
-	struct fuse_ring *ring;
+	struct vfuse_ring *ring;
 	size_t nr_queues = num_possible_cpus();
-	struct fuse_ring *res = NULL;
+	struct vfuse_ring *res = NULL;
 	size_t max_payload_size;
 
 	ring = kzalloc(sizeof(*fc->ring), GFP_KERNEL_ACCOUNT);
 	if (!ring)
 		return NULL;
 
-	ring->queues = kcalloc(nr_queues, sizeof(struct fuse_ring_queue *),
+	ring->queues = kcalloc(nr_queues, sizeof(struct vfuse_ring_queue *),
 			       GFP_KERNEL_ACCOUNT);
 	if (!ring->queues)
 		goto out_err;
 
-	max_payload_size = max(FUSE_MIN_READ_BUFFER, fc->max_write);
+	max_payload_size = max(VFUSE_MIN_READ_BUFFER, fc->max_write);
 	max_payload_size = max(max_payload_size, fc->max_pages * PAGE_SIZE);
 
 	spin_lock(&fc->lock);
@@ -262,17 +262,17 @@ out_err:
 	return res;
 }
 
-static struct fuse_ring_queue *fuse_uring_create_queue(struct fuse_ring *ring,
+static struct vfuse_ring_queue *vfuse_uring_create_queue(struct vfuse_ring *ring,
 						       int qid)
 {
-	struct fuse_conn *fc = ring->fc;
-	struct fuse_ring_queue *queue;
+	struct vfuse_conn *fc = ring->fc;
+	struct vfuse_ring_queue *queue;
 	struct list_head *pq;
 
 	queue = kzalloc(sizeof(*queue), GFP_KERNEL_ACCOUNT);
 	if (!queue)
 		return NULL;
-	pq = kcalloc(FUSE_PQ_HASH_SIZE, sizeof(struct list_head), GFP_KERNEL);
+	pq = kcalloc(VFUSE_PQ_HASH_SIZE, sizeof(struct list_head), GFP_KERNEL);
 	if (!pq) {
 		kfree(queue);
 		return NULL;
@@ -286,12 +286,12 @@ static struct fuse_ring_queue *fuse_uring_create_queue(struct fuse_ring *ring,
 	INIT_LIST_HEAD(&queue->ent_commit_queue);
 	INIT_LIST_HEAD(&queue->ent_w_req_queue);
 	INIT_LIST_HEAD(&queue->ent_in_userspace);
-	INIT_LIST_HEAD(&queue->fuse_req_queue);
-	INIT_LIST_HEAD(&queue->fuse_req_bg_queue);
+	INIT_LIST_HEAD(&queue->vfuse_req_queue);
+	INIT_LIST_HEAD(&queue->vfuse_req_bg_queue);
 	INIT_LIST_HEAD(&queue->ent_released);
 
 	queue->fpq.processing = pq;
-	fuse_pqueue_init(&queue->fpq);
+	vfuse_pqueue_init(&queue->fpq);
 
 	spin_lock(&fc->lock);
 	if (ring->queues[qid]) {
@@ -310,28 +310,28 @@ static struct fuse_ring_queue *fuse_uring_create_queue(struct fuse_ring *ring,
 	return queue;
 }
 
-static void fuse_uring_stop_fuse_req_end(struct fuse_req *req)
+static void vfuse_uring_stop_vfuse_req_end(struct vfuse_req *req)
 {
 	clear_bit(FR_SENT, &req->flags);
 	req->out.h.error = -ECONNABORTED;
-	fuse_request_end(req);
+	vfuse_request_end(req);
 }
 
 /*
  * Release a request/entry on connection tear down
  */
-static void fuse_uring_entry_teardown(struct fuse_ring_ent *ent)
+static void vfuse_uring_entry_teardown(struct vfuse_ring_ent *ent)
 {
-	struct fuse_req *req;
+	struct vfuse_req *req;
 	struct io_uring_cmd *cmd;
 
-	struct fuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring_queue *queue = ent->queue;
 
 	spin_lock(&queue->lock);
 	cmd = ent->cmd;
 	ent->cmd = NULL;
-	req = ent->fuse_req;
-	ent->fuse_req = NULL;
+	req = ent->vfuse_req;
+	ent->vfuse_req = NULL;
 	if (req) {
 		/* remove entry from queue->fpq->processing */
 		list_del_init(&req->list);
@@ -351,15 +351,15 @@ static void fuse_uring_entry_teardown(struct fuse_ring_ent *ent)
 		io_uring_cmd_done(cmd, -ENOTCONN, 0, IO_URING_F_UNLOCKED);
 
 	if (req)
-		fuse_uring_stop_fuse_req_end(req);
+		vfuse_uring_stop_vfuse_req_end(req);
 }
 
-static void fuse_uring_stop_list_entries(struct list_head *head,
-					 struct fuse_ring_queue *queue,
-					 enum fuse_ring_req_state exp_state)
+static void vfuse_uring_stop_list_entries(struct list_head *head,
+					 struct vfuse_ring_queue *queue,
+					 enum vfuse_ring_req_state exp_state)
 {
-	struct fuse_ring *ring = queue->ring;
-	struct fuse_ring_ent *ent, *next;
+	struct vfuse_ring *ring = queue->ring;
+	struct vfuse_ring_ent *ent, *next;
 	ssize_t queue_refs = SSIZE_MAX;
 	LIST_HEAD(to_teardown);
 
@@ -378,30 +378,30 @@ static void fuse_uring_stop_list_entries(struct list_head *head,
 
 	/* no queue lock to avoid lock order issues */
 	list_for_each_entry_safe(ent, next, &to_teardown, list) {
-		fuse_uring_entry_teardown(ent);
+		vfuse_uring_entry_teardown(ent);
 		queue_refs = atomic_dec_return(&ring->queue_refs);
 		WARN_ON_ONCE(queue_refs < 0);
 	}
 }
 
-static void fuse_uring_teardown_entries(struct fuse_ring_queue *queue)
+static void vfuse_uring_teardown_entries(struct vfuse_ring_queue *queue)
 {
-	fuse_uring_stop_list_entries(&queue->ent_in_userspace, queue,
+	vfuse_uring_stop_list_entries(&queue->ent_in_userspace, queue,
 				     FRRS_USERSPACE);
-	fuse_uring_stop_list_entries(&queue->ent_avail_queue, queue,
+	vfuse_uring_stop_list_entries(&queue->ent_avail_queue, queue,
 				     FRRS_AVAILABLE);
 }
 
 /*
  * Log state debug info
  */
-static void fuse_uring_log_ent_state(struct fuse_ring *ring)
+static void vfuse_uring_log_ent_state(struct vfuse_ring *ring)
 {
 	int qid;
-	struct fuse_ring_ent *ent;
+	struct vfuse_ring_ent *ent;
 
 	for (qid = 0; qid < ring->nr_queues; qid++) {
-		struct fuse_ring_queue *queue = ring->queues[qid];
+		struct vfuse_ring_queue *queue = ring->queues[qid];
 
 		if (!queue)
 			continue;
@@ -424,20 +424,20 @@ static void fuse_uring_log_ent_state(struct fuse_ring *ring)
 	ring->stop_debug_log = 1;
 }
 
-static void fuse_uring_async_stop_queues(struct work_struct *work)
+static void vfuse_uring_async_stop_queues(struct work_struct *work)
 {
 	int qid;
-	struct fuse_ring *ring =
-		container_of(work, struct fuse_ring, async_teardown_work.work);
+	struct vfuse_ring *ring =
+		container_of(work, struct vfuse_ring, async_teardown_work.work);
 
 	/* XXX code dup */
 	for (qid = 0; qid < ring->nr_queues; qid++) {
-		struct fuse_ring_queue *queue = READ_ONCE(ring->queues[qid]);
+		struct vfuse_ring_queue *queue = READ_ONCE(ring->queues[qid]);
 
 		if (!queue)
 			continue;
 
-		fuse_uring_teardown_entries(queue);
+		vfuse_uring_teardown_entries(queue);
 	}
 
 	/*
@@ -449,11 +449,11 @@ static void fuse_uring_async_stop_queues(struct work_struct *work)
 	 */
 	if (atomic_read(&ring->queue_refs) > 0) {
 		if (time_after(jiffies,
-			       ring->teardown_time + FUSE_URING_TEARDOWN_TIMEOUT))
-			fuse_uring_log_ent_state(ring);
+			       ring->teardown_time + VFUSE_URING_TEARDOWN_TIMEOUT))
+			vfuse_uring_log_ent_state(ring);
 
 		schedule_delayed_work(&ring->async_teardown_work,
-				      FUSE_URING_TEARDOWN_INTERVAL);
+				      VFUSE_URING_TEARDOWN_INTERVAL);
 	} else {
 		wake_up_all(&ring->stop_waitq);
 	}
@@ -462,25 +462,25 @@ static void fuse_uring_async_stop_queues(struct work_struct *work)
 /*
  * Stop the ring queues
  */
-void fuse_uring_stop_queues(struct fuse_ring *ring)
+void vfuse_uring_stop_queues(struct vfuse_ring *ring)
 {
 	int qid;
 
 	for (qid = 0; qid < ring->nr_queues; qid++) {
-		struct fuse_ring_queue *queue = READ_ONCE(ring->queues[qid]);
+		struct vfuse_ring_queue *queue = READ_ONCE(ring->queues[qid]);
 
 		if (!queue)
 			continue;
 
-		fuse_uring_teardown_entries(queue);
+		vfuse_uring_teardown_entries(queue);
 	}
 
 	if (atomic_read(&ring->queue_refs) > 0) {
 		ring->teardown_time = jiffies;
 		INIT_DELAYED_WORK(&ring->async_teardown_work,
-				  fuse_uring_async_stop_queues);
+				  vfuse_uring_async_stop_queues);
 		schedule_delayed_work(&ring->async_teardown_work,
-				      FUSE_URING_TEARDOWN_INTERVAL);
+				      VFUSE_URING_TEARDOWN_INTERVAL);
 	} else {
 		wake_up_all(&ring->stop_waitq);
 	}
@@ -489,14 +489,14 @@ void fuse_uring_stop_queues(struct fuse_ring *ring)
 /*
  * Handle IO_URING_F_CANCEL, typically should come on daemon termination.
  *
- * Releasing the last entry should trigger fuse_dev_release() if
+ * Releasing the last entry should trigger vfuse_dev_release() if
  * the daemon was terminated
  */
-static void fuse_uring_cancel(struct io_uring_cmd *cmd,
+static void vfuse_uring_cancel(struct io_uring_cmd *cmd,
 			      unsigned int issue_flags)
 {
-	struct fuse_ring_ent *ent = uring_cmd_to_ring_ent(cmd);
-	struct fuse_ring_queue *queue;
+	struct vfuse_ring_ent *ent = uring_cmd_to_ring_ent(cmd);
+	struct vfuse_ring_queue *queue;
 	bool need_cmd_done = false;
 
 	/*
@@ -519,8 +519,8 @@ static void fuse_uring_cancel(struct io_uring_cmd *cmd,
 	}
 }
 
-static void fuse_uring_prepare_cancel(struct io_uring_cmd *cmd, int issue_flags,
-				      struct fuse_ring_ent *ring_ent)
+static void vfuse_uring_prepare_cancel(struct io_uring_cmd *cmd, int issue_flags,
+				      struct vfuse_ring_ent *ring_ent)
 {
 	uring_cmd_set_ring_ent(cmd, ring_ent);
 	io_uring_cmd_mark_cancelable(cmd, issue_flags);
@@ -529,16 +529,16 @@ static void fuse_uring_prepare_cancel(struct io_uring_cmd *cmd, int issue_flags,
 /*
  * Checks for errors and stores it into the request
  */
-static int fuse_uring_out_header_has_err(struct fuse_out_header *oh,
-					 struct fuse_req *req,
-					 struct fuse_conn *fc)
+static int vfuse_uring_out_header_has_err(struct vfuse_out_header *oh,
+					 struct vfuse_req *req,
+					 struct vfuse_conn *fc)
 {
 	int err;
 
 	err = -EINVAL;
 	if (oh->unique == 0) {
 		/* Not supported through io-uring yet */
-		pr_warn_once("notify through fuse-io-uring not supported\n");
+		pr_warn_once("notify through vfuse-io-uring not supported\n");
 		goto err;
 	}
 
@@ -551,34 +551,34 @@ static int fuse_uring_out_header_has_err(struct fuse_out_header *oh,
 	}
 
 	err = -ENOENT;
-	if ((oh->unique & ~FUSE_INT_REQ_BIT) != req->in.h.unique) {
+	if ((oh->unique & ~VFUSE_INT_REQ_BIT) != req->in.h.unique) {
 		pr_warn_ratelimited("unique mismatch, expected: %llu got %llu\n",
 				    req->in.h.unique,
-				    oh->unique & ~FUSE_INT_REQ_BIT);
+				    oh->unique & ~VFUSE_INT_REQ_BIT);
 		goto err;
 	}
 
 	/*
 	 * Is it an interrupt reply ID?
-	 * XXX: Not supported through fuse-io-uring yet, it should not even
+	 * XXX: Not supported through vfuse-io-uring yet, it should not even
 	 *      find the request - should not happen.
 	 */
-	WARN_ON_ONCE(oh->unique & FUSE_INT_REQ_BIT);
+	WARN_ON_ONCE(oh->unique & VFUSE_INT_REQ_BIT);
 
 	err = 0;
 err:
 	return err;
 }
 
-static int fuse_uring_copy_from_ring(struct fuse_ring *ring,
-				     struct fuse_req *req,
-				     struct fuse_ring_ent *ent)
+static int vfuse_uring_copy_from_ring(struct vfuse_ring *ring,
+				     struct vfuse_req *req,
+				     struct vfuse_ring_ent *ent)
 {
-	struct fuse_copy_state cs;
-	struct fuse_args *args = req->args;
+	struct vfuse_copy_state cs;
+	struct vfuse_args *args = req->args;
 	struct iov_iter iter;
 	int err;
-	struct fuse_uring_ent_in_out ring_in_out;
+	struct vfuse_uring_ent_in_out ring_in_out;
 
 	err = copy_from_user(&ring_in_out, &ent->headers->ring_ent_in_out,
 			     sizeof(ring_in_out));
@@ -590,13 +590,13 @@ static int fuse_uring_copy_from_ring(struct fuse_ring *ring,
 	if (err)
 		return err;
 
-	fuse_copy_init(&cs, 0, &iter);
+	vfuse_copy_init(&cs, 0, &iter);
 	cs.is_uring = 1;
 	cs.req = req;
 	if (ent->payload_pages)
 		cs.ring.pages = ent->payload_pages;
 
-	return fuse_copy_out_args(&cs, args, ring_in_out.payload_sz);
+	return vfuse_copy_out_args(&cs, args, ring_in_out.payload_sz);
 }
 
 /*
@@ -605,23 +605,23 @@ static int fuse_uring_copy_from_ring(struct fuse_ring *ring,
  * i.e. to avoid io_uring_cmd_complete_in_task(), the header needs to be
  * pinned as well.
  */
-static int fuse_uring_args_to_ring_pages(struct fuse_ring *ring,
-					 struct fuse_req *req,
-					 struct fuse_ring_ent *ent,
-					 struct fuse_uring_req_header *headers)
+static int vfuse_uring_args_to_ring_pages(struct vfuse_ring *ring,
+					 struct vfuse_req *req,
+					 struct vfuse_ring_ent *ent,
+					 struct vfuse_uring_req_header *headers)
 {
-	struct fuse_copy_state cs;
-	struct fuse_args *args = req->args;
-	struct fuse_in_arg *in_args = args->in_args;
+	struct vfuse_copy_state cs;
+	struct vfuse_args *args = req->args;
+	struct vfuse_in_arg *in_args = args->in_args;
 	int num_args = args->in_numargs;
 	int err;
 
-	struct fuse_uring_ent_in_out ent_in_out = {
+	struct vfuse_uring_ent_in_out ent_in_out = {
 		.flags = 0,
 		.commit_id = req->in.h.unique,
 	};
 
-	fuse_copy_init(&cs, 1, NULL);
+	vfuse_copy_init(&cs, 1, NULL);
 	cs.is_uring = 1;
 	cs.req = req;
 	cs.ring.pages = ent->payload_pages;
@@ -639,10 +639,10 @@ static int fuse_uring_args_to_ring_pages(struct fuse_ring *ring,
 	}
 
 	/* copy the payload */
-	err = fuse_copy_args(&cs, num_args, args->in_pages,
-			     (struct fuse_arg *)in_args, 0);
+	err = vfuse_copy_args(&cs, num_args, args->in_pages,
+			     (struct vfuse_arg *)in_args, 0);
 	if (err) {
-		pr_info_ratelimited("%s fuse_copy_args failed\n", __func__);
+		pr_info_ratelimited("%s vfuse_copy_args failed\n", __func__);
 		return err;
 	}
 
@@ -654,27 +654,27 @@ static int fuse_uring_args_to_ring_pages(struct fuse_ring *ring,
 /*
  * Copy data from the req to the ring buffer
  */
-static int fuse_uring_args_to_ring(struct fuse_ring *ring, struct fuse_req *req,
-				   struct fuse_ring_ent *ent)
+static int vfuse_uring_args_to_ring(struct vfuse_ring *ring, struct vfuse_req *req,
+				   struct vfuse_ring_ent *ent)
 {
-	struct fuse_copy_state cs;
-	struct fuse_args *args = req->args;
-	struct fuse_in_arg *in_args = args->in_args;
+	struct vfuse_copy_state cs;
+	struct vfuse_args *args = req->args;
+	struct vfuse_in_arg *in_args = args->in_args;
 	int num_args = args->in_numargs;
 	int err;
 	struct iov_iter iter;
-	struct fuse_uring_ent_in_out ent_in_out = {
+	struct vfuse_uring_ent_in_out ent_in_out = {
 		.flags = 0,
 		.commit_id = req->in.h.unique,
 	};
 
 	err = import_ubuf(ITER_DEST, ent->payload, ring->max_payload_sz, &iter);
 	if (err) {
-		pr_info_ratelimited("fuse: Import of user buffer failed\n");
+		pr_info_ratelimited("vfuse: Import of user buffer failed\n");
 		return err;
 	}
 
-	fuse_copy_init(&cs, 1, &iter);
+	vfuse_copy_init(&cs, 1, &iter);
 	cs.is_uring = 1;
 	cs.req = req;
 	if (ent->payload_pages)
@@ -699,10 +699,10 @@ static int fuse_uring_args_to_ring(struct fuse_ring *ring, struct fuse_req *req,
 	}
 
 	/* copy the payload */
-	err = fuse_copy_args(&cs, num_args, args->in_pages,
-			     (struct fuse_arg *)in_args, 0);
+	err = vfuse_copy_args(&cs, num_args, args->in_pages,
+			     (struct vfuse_arg *)in_args, 0);
 	if (err) {
-		pr_info_ratelimited("%s fuse_copy_args failed\n", __func__);
+		pr_info_ratelimited("%s vfuse_copy_args failed\n", __func__);
 		return err;
 	}
 
@@ -712,16 +712,16 @@ static int fuse_uring_args_to_ring(struct fuse_ring *ring, struct fuse_req *req,
 	return err ? -EFAULT : 0;
 }
 
-static int fuse_uring_copy_to_ring(struct fuse_ring_ent *ent,
-				   struct fuse_req *req)
+static int vfuse_uring_copy_to_ring(struct vfuse_ring_ent *ent,
+				   struct vfuse_req *req)
 {
-	struct fuse_ring_queue *queue = ent->queue;
-	struct fuse_ring *ring = queue->ring;
+	struct vfuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring *ring = queue->ring;
 	int err;
-	struct fuse_uring_req_header *headers = NULL;
+	struct vfuse_uring_req_header *headers = NULL;
 
 	err = -EIO;
-	if (WARN_ON(ent->state != FRRS_FUSE_REQ)) {
+	if (WARN_ON(ent->state != FRRS_VFUSE_REQ)) {
 		pr_err("qid=%d ring-req=%p invalid state %d on send\n",
 		       queue->qid, ent, ent->state);
 		return err;
@@ -731,18 +731,18 @@ static int fuse_uring_copy_to_ring(struct fuse_ring_ent *ent,
 	if (WARN_ON(req->in.h.unique == 0))
 		return err;
 
-	/* copy fuse_in_header */
+	/* copy vfuse_in_header */
 	if (ent->header_pages) {
 		headers = kmap_local_page(
-			ent->header_pages[FUSE_RING_HEADER_PG]);
+			ent->header_pages[VFUSE_RING_HEADER_PG]);
 
 		memcpy(&headers->in_out, &req->in.h, sizeof(req->in.h));
 
-		err = fuse_uring_args_to_ring_pages(ring, req, ent, headers);
+		err = vfuse_uring_args_to_ring_pages(ring, req, ent, headers);
 		kunmap_local(headers);
 	} else {
 		/* copy the request */
-		err = fuse_uring_args_to_ring(ring, req, ent);
+		err = vfuse_uring_args_to_ring(ring, req, ent);
 		if (unlikely(err)) {
 			pr_info_ratelimited("Copy to ring failed: %d\n", err);
 			return err;
@@ -756,24 +756,24 @@ static int fuse_uring_copy_to_ring(struct fuse_ring_ent *ent,
 	return err;
 }
 
-static int fuse_uring_prepare_send(struct fuse_ring_ent *ent,
-				   struct fuse_req *req)
+static int vfuse_uring_prepare_send(struct vfuse_ring_ent *ent,
+				   struct vfuse_req *req)
 {
 	int err;
 
-	err = fuse_uring_copy_to_ring(ent, req);
+	err = vfuse_uring_copy_to_ring(ent, req);
 	if (!err)
 		set_bit(FR_SENT, &req->flags);
 	else
-		fuse_uring_req_end(ent, req, err);
+		vfuse_uring_req_end(ent, req, err);
 
 	return err;
 }
 
-static void fuse_uring_send(struct fuse_ring_ent *ent, struct io_uring_cmd *cmd,
+static void vfuse_uring_send(struct vfuse_ring_ent *ent, struct io_uring_cmd *cmd,
 			    ssize_t ret, unsigned int issue_flags)
 {
-	struct fuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring_queue *queue = ent->queue;
 
 	spin_lock(&queue->lock);
 	ent->state = FRRS_USERSPACE;
@@ -781,34 +781,34 @@ static void fuse_uring_send(struct fuse_ring_ent *ent, struct io_uring_cmd *cmd,
 	ent->cmd = NULL;
 	spin_unlock(&queue->lock);
 
-	trace_fuse_request_send(ent->fuse_req);
+	trace_vfuse_request_send(ent->vfuse_req);
 	io_uring_cmd_done(cmd, ret, 0, issue_flags);
 }
 
 /*
  * Write data to the ring buffer and send the request to userspace,
  * userspace will read it
- * This is comparable with classical read(/dev/fuse)
+ * This is comparable with classical read(/dev/vfuse)
  */
-static int fuse_uring_send_next_to_ring(struct fuse_ring_ent *ent,
-					struct fuse_req *req,
+static int vfuse_uring_send_next_to_ring(struct vfuse_ring_ent *ent,
+					struct vfuse_req *req,
 					unsigned int issue_flags)
 {
 	int err;
 
-	err = fuse_uring_prepare_send(ent, req);
+	err = vfuse_uring_prepare_send(ent, req);
 	if (err)
 		return err;
 
-	fuse_uring_send(ent, ent->cmd, 0, issue_flags);
+	vfuse_uring_send(ent, ent->cmd, 0, issue_flags);
 	return 0;
 }
 
 /*
- * Make a ring entry available for fuse_req assignment
+ * Make a ring entry available for vfuse_req assignment
  */
-static void fuse_uring_ent_avail(struct fuse_ring_ent *ent,
-				 struct fuse_ring_queue *queue)
+static void vfuse_uring_ent_avail(struct vfuse_ring_ent *ent,
+				 struct vfuse_ring_queue *queue)
 {
 	WARN_ON_ONCE(!ent->cmd);
 	list_move(&ent->list, &queue->ent_avail_queue);
@@ -816,25 +816,25 @@ static void fuse_uring_ent_avail(struct fuse_ring_ent *ent,
 }
 
 /* Used to find the request on SQE commit */
-static void fuse_uring_add_to_pq(struct fuse_ring_ent *ent,
-				 struct fuse_req *req)
+static void vfuse_uring_add_to_pq(struct vfuse_ring_ent *ent,
+				 struct vfuse_req *req)
 {
-	struct fuse_ring_queue *queue = ent->queue;
-	struct fuse_pqueue *fpq = &queue->fpq;
+	struct vfuse_ring_queue *queue = ent->queue;
+	struct vfuse_pqueue *fpq = &queue->fpq;
 	unsigned int hash;
 
 	req->ring_entry = ent;
-	hash = fuse_req_hash(req->in.h.unique);
+	hash = vfuse_req_hash(req->in.h.unique);
 	list_move_tail(&req->list, &fpq->processing[hash]);
 }
 
 /*
- * Assign a fuse queue entry to the given entry
+ * Assign a vfuse queue entry to the given entry
  */
-static void fuse_uring_add_req_to_ring_ent(struct fuse_ring_ent *ent,
-					   struct fuse_req *req)
+static void vfuse_uring_add_req_to_ring_ent(struct vfuse_ring_ent *ent,
+					   struct vfuse_req *req)
 {
-	struct fuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring_queue *queue = ent->queue;
 
 	lockdep_assert_held(&queue->lock);
 
@@ -845,40 +845,40 @@ static void fuse_uring_add_req_to_ring_ent(struct fuse_ring_ent *ent,
 	}
 
 	clear_bit(FR_PENDING, &req->flags);
-	ent->fuse_req = req;
-	ent->state = FRRS_FUSE_REQ;
+	ent->vfuse_req = req;
+	ent->state = FRRS_VFUSE_REQ;
 	list_move(&ent->list, &queue->ent_w_req_queue);
-	fuse_uring_add_to_pq(ent, req);
+	vfuse_uring_add_to_pq(ent, req);
 }
 
-/* Fetch the next fuse request if available */
-static struct fuse_req *fuse_uring_ent_assign_req(struct fuse_ring_ent *ent)
+/* Fetch the next vfuse request if available */
+static struct vfuse_req *vfuse_uring_ent_assign_req(struct vfuse_ring_ent *ent)
 	__must_hold(&queue->lock)
 {
-	struct fuse_req *req;
-	struct fuse_ring_queue *queue = ent->queue;
-	struct list_head *req_queue = &queue->fuse_req_queue;
+	struct vfuse_req *req;
+	struct vfuse_ring_queue *queue = ent->queue;
+	struct list_head *req_queue = &queue->vfuse_req_queue;
 
 	lockdep_assert_held(&queue->lock);
 
 	/* get and assign the next entry while it is still holding the lock */
-	req = list_first_entry_or_null(req_queue, struct fuse_req, list);
+	req = list_first_entry_or_null(req_queue, struct vfuse_req, list);
 	if (req)
-		fuse_uring_add_req_to_ring_ent(ent, req);
+		vfuse_uring_add_req_to_ring_ent(ent, req);
 
 	return req;
 }
 
 /*
  * Read data from the ring buffer, which user space has written to
- * This is comparible with handling of classical write(/dev/fuse).
- * Also make the ring request available again for new fuse requests.
+ * This is comparible with handling of classical write(/dev/vfuse).
+ * Also make the ring request available again for new vfuse requests.
  */
-static void fuse_uring_commit(struct fuse_ring_ent *ent, struct fuse_req *req,
+static void vfuse_uring_commit(struct vfuse_ring_ent *ent, struct vfuse_req *req,
 			      unsigned int issue_flags)
 {
-	struct fuse_ring *ring = ent->queue->ring;
-	struct fuse_conn *fc = ring->fc;
+	struct vfuse_ring *ring = ent->queue->ring;
+	struct vfuse_conn *fc = ring->fc;
 	ssize_t err = 0;
 
 	err = copy_from_user(&req->out.h, &ent->headers->in_out,
@@ -888,43 +888,43 @@ static void fuse_uring_commit(struct fuse_ring_ent *ent, struct fuse_req *req,
 		goto out;
 	}
 
-	err = fuse_uring_out_header_has_err(&req->out.h, req, fc);
+	err = vfuse_uring_out_header_has_err(&req->out.h, req, fc);
 	if (err) {
 		/* req->out.h.error already set */
 		goto out;
 	}
 
-	err = fuse_uring_copy_from_ring(ring, req, ent);
+	err = vfuse_uring_copy_from_ring(ring, req, ent);
 out:
-	fuse_uring_req_end(ent, req, err);
+	vfuse_uring_req_end(ent, req, err);
 }
 
 /*
- * Get the next fuse req and send it
+ * Get the next vfuse req and send it
  */
-static void fuse_uring_next_fuse_req(struct fuse_ring_ent *ent,
-				     struct fuse_ring_queue *queue,
+static void vfuse_uring_next_vfuse_req(struct vfuse_ring_ent *ent,
+				     struct vfuse_ring_queue *queue,
 				     unsigned int issue_flags)
 {
 	int err;
-	struct fuse_req *req;
+	struct vfuse_req *req;
 
 retry:
 	spin_lock(&queue->lock);
-	fuse_uring_ent_avail(ent, queue);
-	req = fuse_uring_ent_assign_req(ent);
+	vfuse_uring_ent_avail(ent, queue);
+	req = vfuse_uring_ent_assign_req(ent);
 	spin_unlock(&queue->lock);
 
 	if (req) {
-		err = fuse_uring_send_next_to_ring(ent, req, issue_flags);
+		err = vfuse_uring_send_next_to_ring(ent, req, issue_flags);
 		if (err)
 			goto retry;
 	}
 }
 
-static int fuse_ring_ent_set_commit(struct fuse_ring_ent *ent)
+static int vfuse_ring_ent_set_commit(struct vfuse_ring_ent *ent)
 {
-	struct fuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring_queue *queue = ent->queue;
 
 	lockdep_assert_held(&queue->lock);
 
@@ -937,19 +937,19 @@ static int fuse_ring_ent_set_commit(struct fuse_ring_ent *ent)
 	return 0;
 }
 
-/* FUSE_URING_CMD_COMMIT_AND_FETCH handler */
-static int fuse_uring_commit_fetch(struct io_uring_cmd *cmd, int issue_flags,
-				   struct fuse_conn *fc)
+/* VFUSE_URING_CMD_COMMIT_AND_FETCH handler */
+static int vfuse_uring_commit_fetch(struct io_uring_cmd *cmd, int issue_flags,
+				   struct vfuse_conn *fc)
 {
-	const struct fuse_uring_cmd_req *cmd_req = io_uring_sqe_cmd(cmd->sqe);
-	struct fuse_ring_ent *ent;
+	const struct vfuse_uring_cmd_req *cmd_req = io_uring_sqe_cmd(cmd->sqe);
+	struct vfuse_ring_ent *ent;
 	int err;
-	struct fuse_ring *ring = fc->ring;
-	struct fuse_ring_queue *queue;
+	struct vfuse_ring *ring = fc->ring;
+	struct vfuse_ring_queue *queue;
 	uint64_t commit_id = READ_ONCE(cmd_req->commit_id);
 	unsigned int qid = READ_ONCE(cmd_req->qid);
-	struct fuse_pqueue *fpq;
-	struct fuse_req *req;
+	struct vfuse_pqueue *fpq;
+	struct vfuse_req *req;
 
 	err = -ENOTCONN;
 	if (!ring)
@@ -967,12 +967,12 @@ static int fuse_uring_commit_fetch(struct io_uring_cmd *cmd, int issue_flags,
 		return err;
 
 	spin_lock(&queue->lock);
-	/* Find a request based on the unique ID of the fuse request
+	/* Find a request based on the unique ID of the vfuse request
 	 * This should get revised, as it needs a hash calculation and list
-	 * search. And full struct fuse_pqueue is needed (memory overhead).
+	 * search. And full struct vfuse_pqueue is needed (memory overhead).
 	 * As well as the link from req to ring_ent.
 	 */
-	req = fuse_request_find(fpq, commit_id);
+	req = vfuse_request_find(fpq, commit_id);
 	err = -ENOENT;
 	if (!req) {
 		pr_info("qid=%d commit_id %llu not found\n", queue->qid,
@@ -984,14 +984,14 @@ static int fuse_uring_commit_fetch(struct io_uring_cmd *cmd, int issue_flags,
 	ent = req->ring_entry;
 	req->ring_entry = NULL;
 
-	err = fuse_ring_ent_set_commit(ent);
+	err = vfuse_ring_ent_set_commit(ent);
 	if (err != 0) {
 		pr_info_ratelimited("qid=%d commit_id %llu state %d",
 				    queue->qid, commit_id, ent->state);
 		spin_unlock(&queue->lock);
 		req->out.h.error = err;
 		clear_bit(FR_SENT, &req->flags);
-		fuse_request_end(req);
+		vfuse_request_end(req);
 		return err;
 	}
 
@@ -999,23 +999,23 @@ static int fuse_uring_commit_fetch(struct io_uring_cmd *cmd, int issue_flags,
 	spin_unlock(&queue->lock);
 
 	/* without the queue lock, as other locks are taken */
-	fuse_uring_prepare_cancel(cmd, issue_flags, ent);
-	fuse_uring_commit(ent, req, issue_flags);
+	vfuse_uring_prepare_cancel(cmd, issue_flags, ent);
+	vfuse_uring_commit(ent, req, issue_flags);
 
 	/*
 	 * Fetching the next request is absolutely required as queued
-	 * fuse requests would otherwise not get processed - committing
-	 * and fetching is done in one step vs legacy fuse, which has separated
+	 * vfuse requests would otherwise not get processed - committing
+	 * and fetching is done in one step vs legacy vfuse, which has separated
 	 * read (fetch request) and write (commit result).
 	 */
-	fuse_uring_next_fuse_req(ent, queue, issue_flags);
+	vfuse_uring_next_vfuse_req(ent, queue, issue_flags);
 	return 0;
 }
 
-static bool is_ring_ready(struct fuse_ring *ring, int current_qid)
+static bool is_ring_ready(struct vfuse_ring *ring, int current_qid)
 {
 	int qid;
-	struct fuse_ring_queue *queue;
+	struct vfuse_ring_queue *queue;
 	bool ready = true;
 
 	for (qid = 0; qid < ring->nr_queues && ready; qid++) {
@@ -1038,29 +1038,29 @@ static bool is_ring_ready(struct fuse_ring *ring, int current_qid)
 }
 
 /*
- * fuse_uring_req_fetch command handling
+ * vfuse_uring_req_fetch command handling
  */
-static void fuse_uring_do_register(struct fuse_ring_ent *ent,
+static void vfuse_uring_do_register(struct vfuse_ring_ent *ent,
 				   struct io_uring_cmd *cmd,
 				   unsigned int issue_flags)
 {
-	struct fuse_ring_queue *queue = ent->queue;
-	struct fuse_ring *ring = queue->ring;
-	struct fuse_conn *fc = ring->fc;
-	struct fuse_iqueue *fiq = &fc->iq;
+	struct vfuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring *ring = queue->ring;
+	struct vfuse_conn *fc = ring->fc;
+	struct vfuse_iqueue *fiq = &fc->iq;
 
-	fuse_uring_prepare_cancel(cmd, issue_flags, ent);
+	vfuse_uring_prepare_cancel(cmd, issue_flags, ent);
 
 	spin_lock(&queue->lock);
 	ent->cmd = cmd;
-	fuse_uring_ent_avail(ent, queue);
+	vfuse_uring_ent_avail(ent, queue);
 	spin_unlock(&queue->lock);
 
 	if (!ring->ready) {
 		bool ready = is_ring_ready(ring, queue->qid);
 
 		if (ready) {
-			WRITE_ONCE(fiq->ops, &fuse_io_uring_ops);
+			WRITE_ONCE(fiq->ops, &vfuse_io_uring_ops);
 			WRITE_ONCE(ring->ready, true);
 			wake_up_all(&fc->blocked_waitq);
 		}
@@ -1110,31 +1110,31 @@ static struct page **io_pin_pages(unsigned long uaddr, unsigned long len,
  * sqe->addr is a ptr to an iovec array, iov[0] has the headers, iov[1]
  * the payload
  */
-static int fuse_uring_get_iovec_from_sqe(const struct io_uring_sqe *sqe,
-					 struct iovec iov[FUSE_URING_IOV_SEGS])
+static int vfuse_uring_get_iovec_from_sqe(const struct io_uring_sqe *sqe,
+					 struct iovec iov[VFUSE_URING_IOV_SEGS])
 {
 	struct iovec __user *uiov = u64_to_user_ptr(READ_ONCE(sqe->addr));
 	struct iov_iter iter;
 	ssize_t ret;
 
-	if (sqe->len != FUSE_URING_IOV_SEGS)
+	if (sqe->len != VFUSE_URING_IOV_SEGS)
 		return -EINVAL;
 
 	/*
 	 * Direction for buffer access will actually be READ and WRITE,
 	 * using write for the import should include READ access as well.
 	 */
-	ret = import_iovec(WRITE, uiov, FUSE_URING_IOV_SEGS,
-			   FUSE_URING_IOV_SEGS, &iov, &iter);
+	ret = import_iovec(WRITE, uiov, VFUSE_URING_IOV_SEGS,
+			   VFUSE_URING_IOV_SEGS, &iov, &iter);
 	if (ret < 0)
 		return ret;
 
 	return 0;
 }
 
-static int fuse_uring_pin_pages(struct fuse_ring_ent *ent)
+static int vfuse_uring_pin_pages(struct vfuse_ring_ent *ent)
 {
-	struct fuse_ring *ring = ent->queue->ring;
+	struct vfuse_ring *ring = ent->queue->ring;
 	int err;
 
 	/*
@@ -1152,7 +1152,7 @@ static int fuse_uring_pin_pages(struct fuse_ring_ent *ent)
 	}
 
 	ent->header_pages = io_pin_pages((unsigned long)ent->headers,
-					 sizeof(struct fuse_uring_req_header),
+					 sizeof(struct vfuse_uring_req_header),
 					 &ent->nr_header_pages);
 	if (IS_ERR(ent->header_pages)) {
 		err = PTR_ERR(ent->header_pages);
@@ -1185,17 +1185,17 @@ static int fuse_uring_pin_pages(struct fuse_ring_ent *ent)
 	return 0;
 }
 
-static struct fuse_ring_ent *
-fuse_uring_create_ring_ent(struct io_uring_cmd *cmd,
-			   struct fuse_ring_queue *queue)
+static struct vfuse_ring_ent *
+vfuse_uring_create_ring_ent(struct io_uring_cmd *cmd,
+			   struct vfuse_ring_queue *queue)
 {
-	struct fuse_ring *ring = queue->ring;
-	struct fuse_ring_ent *ent;
+	struct vfuse_ring *ring = queue->ring;
+	struct vfuse_ring_ent *ent;
 	size_t payload_size;
-	struct iovec iov[FUSE_URING_IOV_SEGS];
+	struct iovec iov[VFUSE_URING_IOV_SEGS];
 	int err;
 
-	err = fuse_uring_get_iovec_from_sqe(cmd->sqe, iov);
+	err = vfuse_uring_get_iovec_from_sqe(cmd->sqe, iov);
 	if (err) {
 		pr_info_ratelimited("Failed to get iovec from sqe, err=%d\n",
 				    err);
@@ -1203,7 +1203,7 @@ fuse_uring_create_ring_ent(struct io_uring_cmd *cmd,
 	}
 
 	err = -EINVAL;
-	if (iov[0].iov_len < sizeof(struct fuse_uring_req_header)) {
+	if (iov[0].iov_len < sizeof(struct vfuse_uring_req_header)) {
 		pr_info_ratelimited("Invalid header len %zu\n", iov[0].iov_len);
 		return ERR_PTR(err);
 	}
@@ -1226,7 +1226,7 @@ fuse_uring_create_ring_ent(struct io_uring_cmd *cmd,
 	ent->headers = iov[0].iov_base;
 	ent->payload = iov[1].iov_base;
 
-	err = fuse_uring_pin_pages(ent);
+	err = vfuse_uring_pin_pages(ent);
 	if (err) {
 		kfree(ent);
 		return ERR_PTR(err);
@@ -1238,33 +1238,33 @@ fuse_uring_create_ring_ent(struct io_uring_cmd *cmd,
 
 /*
  * Register header and payload buffer with the kernel and puts the
- * entry as "ready to get fuse requests" on the queue
+ * entry as "ready to get vfuse requests" on the queue
  */
-static int fuse_uring_register(struct io_uring_cmd *cmd,
-			       unsigned int issue_flags, struct fuse_conn *fc)
+static int vfuse_uring_register(struct io_uring_cmd *cmd,
+			       unsigned int issue_flags, struct vfuse_conn *fc)
 {
-	const struct fuse_uring_cmd_req *cmd_req = io_uring_sqe_cmd(cmd->sqe);
-	struct fuse_ring *ring = smp_load_acquire(&fc->ring);
-	struct fuse_ring_queue *queue;
-	struct fuse_ring_ent *ent;
+	const struct vfuse_uring_cmd_req *cmd_req = io_uring_sqe_cmd(cmd->sqe);
+	struct vfuse_ring *ring = smp_load_acquire(&fc->ring);
+	struct vfuse_ring_queue *queue;
+	struct vfuse_ring_ent *ent;
 	int err;
 	unsigned int qid = READ_ONCE(cmd_req->qid);
 
 	err = -ENOMEM;
 	if (!ring) {
-		ring = fuse_uring_create(fc);
+		ring = vfuse_uring_create(fc);
 		if (!ring)
 			return err;
 	}
 
 	if (qid >= ring->nr_queues) {
-		pr_info_ratelimited("fuse: Invalid ring qid %u\n", qid);
+		pr_info_ratelimited("vfuse: Invalid ring qid %u\n", qid);
 		return -EINVAL;
 	}
 
 	queue = ring->queues[qid];
 	if (!queue) {
-		queue = fuse_uring_create_queue(ring, qid);
+		queue = vfuse_uring_create_queue(ring, qid);
 		if (!queue)
 			return err;
 	}
@@ -1274,11 +1274,11 @@ static int fuse_uring_register(struct io_uring_cmd *cmd,
 	 * case of entry errors below, will be done at ring destruction time.
 	 */
 
-	ent = fuse_uring_create_ring_ent(cmd, queue);
+	ent = vfuse_uring_create_ring_ent(cmd, queue);
 	if (IS_ERR(ent))
 		return PTR_ERR(ent);
 
-	fuse_uring_do_register(ent, cmd, issue_flags);
+	vfuse_uring_do_register(ent, cmd, issue_flags);
 
 	return 0;
 }
@@ -1287,32 +1287,32 @@ static int fuse_uring_register(struct io_uring_cmd *cmd,
  * Entry function from io_uring to handle the given passthrough command
  * (op code IORING_OP_URING_CMD)
  */
-int fuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
+int vfuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 {
-	struct fuse_dev *fud;
-	struct fuse_conn *fc;
+	struct vfuse_dev *fud;
+	struct vfuse_conn *fc;
 	u32 cmd_op = cmd->cmd_op;
 	int err;
 
 	if ((unlikely(issue_flags & IO_URING_F_CANCEL))) {
-		fuse_uring_cancel(cmd, issue_flags);
+		vfuse_uring_cancel(cmd, issue_flags);
 		return 0;
 	}
 
-	/* This extra SQE size holds struct fuse_uring_cmd_req */
+	/* This extra SQE size holds struct vfuse_uring_cmd_req */
 	if (!(issue_flags & IO_URING_F_SQE128))
 		return -EINVAL;
 
-	fud = fuse_get_dev(cmd->file);
+	fud = vfuse_get_dev(cmd->file);
 	if (!fud) {
-		pr_info_ratelimited("No fuse device found\n");
+		pr_info_ratelimited("No vfuse device found\n");
 		return -ENOTCONN;
 	}
 	fc = fud->fc;
 
 	/* Once a connection has io-uring enabled on it, it can't be disabled */
 	if (!enable_uring && !fc->io_uring) {
-		pr_info_ratelimited("fuse-io-uring is disabled\n");
+		pr_info_ratelimited("vfuse-io-uring is disabled\n");
 		return -EOPNOTSUPP;
 	}
 
@@ -1322,27 +1322,27 @@ int fuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 		return -ENOTCONN;
 
 	/*
-	 * fuse_uring_register() needs the ring to be initialized,
+	 * vfuse_uring_register() needs the ring to be initialized,
 	 * we need to know the max payload size
 	 */
 	if (!fc->initialized)
 		return -EAGAIN;
 
 	switch (cmd_op) {
-	case FUSE_IO_URING_CMD_REGISTER:
-		err = fuse_uring_register(cmd, issue_flags, fc);
+	case VFUSE_IO_URING_CMD_REGISTER:
+		err = vfuse_uring_register(cmd, issue_flags, fc);
 		if (err) {
-			pr_info_once("FUSE_IO_URING_CMD_REGISTER failed err=%d\n",
+			pr_info_once("VFUSE_IO_URING_CMD_REGISTER failed err=%d\n",
 				     err);
 			fc->io_uring = 0;
 			wake_up_all(&fc->blocked_waitq);
 			return err;
 		}
 		break;
-	case FUSE_IO_URING_CMD_COMMIT_AND_FETCH:
-		err = fuse_uring_commit_fetch(cmd, issue_flags, fc);
+	case VFUSE_IO_URING_CMD_COMMIT_AND_FETCH:
+		err = vfuse_uring_commit_fetch(cmd, issue_flags, fc);
 		if (err) {
-			pr_info_once("FUSE_IO_URING_COMMIT_AND_FETCH failed err=%d\n",
+			pr_info_once("VFUSE_IO_URING_COMMIT_AND_FETCH failed err=%d\n",
 				     err);
 			return err;
 		}
@@ -1355,34 +1355,34 @@ int fuse_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 }
 
 /*
- * This prepares and sends the ring request in fuse-uring task context.
+ * This prepares and sends the ring request in vfuse-uring task context.
  * User buffers are not mapped yet - the application does not have permission
  * to write to it - this has to be executed in ring task context.
  */
-static void fuse_uring_send_in_task(struct io_uring_cmd *cmd,
+static void vfuse_uring_send_in_task(struct io_uring_cmd *cmd,
 				    unsigned int issue_flags)
 {
-	struct fuse_ring_ent *ent = uring_cmd_to_ring_ent(cmd);
-	struct fuse_ring_queue *queue = ent->queue;
+	struct vfuse_ring_ent *ent = uring_cmd_to_ring_ent(cmd);
+	struct vfuse_ring_queue *queue = ent->queue;
 	int err;
 
 	if (!(issue_flags & IO_URING_F_TASK_DEAD)) {
-		err = fuse_uring_prepare_send(ent, ent->fuse_req);
+		err = vfuse_uring_prepare_send(ent, ent->vfuse_req);
 		if (err) {
-			fuse_uring_next_fuse_req(ent, queue, issue_flags);
+			vfuse_uring_next_vfuse_req(ent, queue, issue_flags);
 			return;
 		}
 	} else {
 		err = -ECANCELED;
 	}
 
-	fuse_uring_send(ent, cmd, err, issue_flags);
+	vfuse_uring_send(ent, cmd, err, issue_flags);
 }
 
-static struct fuse_ring_queue *fuse_uring_task_to_queue(struct fuse_ring *ring)
+static struct vfuse_ring_queue *vfuse_uring_task_to_queue(struct vfuse_ring *ring)
 {
 	unsigned int qid;
-	struct fuse_ring_queue *queue;
+	struct vfuse_ring_queue *queue;
 
 	qid = task_cpu(current);
 
@@ -1397,44 +1397,44 @@ static struct fuse_ring_queue *fuse_uring_task_to_queue(struct fuse_ring *ring)
 	return queue;
 }
 
-static void fuse_uring_dispatch_ent(struct fuse_ring_ent *ent, bool bg)
+static void vfuse_uring_dispatch_ent(struct vfuse_ring_ent *ent, bool bg)
 {
 	struct io_uring_cmd *cmd = ent->cmd;
 
 	/*
 	 * Task needed when pages are not pinned as the application doing IO
-	 * is not allowed to write into fuse-server pages.
+	 * is not allowed to write into vfuse-server pages.
 	 * Additionally for IO through io-uring as issue flags are unknown then.
 	 * backgrounds requests might hold spin-locks, that conflict with
 	 * io_uring_cmd_done() mutex lock.
 	 */
 	if (!ent->header_pages || current->io_uring || bg) {
 		uring_cmd_set_ring_ent(cmd, ent);
-		io_uring_cmd_complete_in_task(cmd, fuse_uring_send_in_task);
+		io_uring_cmd_complete_in_task(cmd, vfuse_uring_send_in_task);
 	} else {
-		int err = fuse_uring_prepare_send(ent, ent->fuse_req);
-		struct fuse_ring_queue *queue = ent->queue;
+		int err = vfuse_uring_prepare_send(ent, ent->vfuse_req);
+		struct vfuse_ring_queue *queue = ent->queue;
 
 		if (err) {
-			fuse_uring_next_fuse_req(ent, queue,
+			vfuse_uring_next_vfuse_req(ent, queue,
 						 IO_URING_F_UNLOCKED);
 			return;
 		}
-		fuse_uring_send(ent, cmd, 0, IO_URING_F_UNLOCKED);
+		vfuse_uring_send(ent, cmd, 0, IO_URING_F_UNLOCKED);
 	}
 }
 
-/* queue a fuse request and send it if a ring entry is available */
-void fuse_uring_queue_fuse_req(struct fuse_iqueue *fiq, struct fuse_req *req)
+/* queue a vfuse request and send it if a ring entry is available */
+void vfuse_uring_queue_vfuse_req(struct vfuse_iqueue *fiq, struct vfuse_req *req)
 {
-	struct fuse_conn *fc = req->fm->fc;
-	struct fuse_ring *ring = fc->ring;
-	struct fuse_ring_queue *queue;
-	struct fuse_ring_ent *ent = NULL;
+	struct vfuse_conn *fc = req->fm->fc;
+	struct vfuse_ring *ring = fc->ring;
+	struct vfuse_ring_queue *queue;
+	struct vfuse_ring_ent *ent = NULL;
 	int err;
 
 	err = -EINVAL;
-	queue = fuse_uring_task_to_queue(ring);
+	queue = vfuse_uring_task_to_queue(ring);
 	if (!queue)
 		goto err;
 
@@ -1446,15 +1446,15 @@ void fuse_uring_queue_fuse_req(struct fuse_iqueue *fiq, struct fuse_req *req)
 	set_bit(FR_URING, &req->flags);
 	req->ring_queue = queue;
 	ent = list_first_entry_or_null(&queue->ent_avail_queue,
-				       struct fuse_ring_ent, list);
+				       struct vfuse_ring_ent, list);
 	if (ent)
-		fuse_uring_add_req_to_ring_ent(ent, req);
+		vfuse_uring_add_req_to_ring_ent(ent, req);
 	else
-		list_add_tail(&req->list, &queue->fuse_req_queue);
+		list_add_tail(&req->list, &queue->vfuse_req_queue);
 	spin_unlock(&queue->lock);
 
 	if (ent)
-		fuse_uring_dispatch_ent(ent, false);
+		vfuse_uring_dispatch_ent(ent, false);
 
 	return;
 
@@ -1463,17 +1463,17 @@ err_unlock:
 err:
 	req->out.h.error = err;
 	clear_bit(FR_PENDING, &req->flags);
-	fuse_request_end(req);
+	vfuse_request_end(req);
 }
 
-bool fuse_uring_queue_bq_req(struct fuse_req *req)
+bool vfuse_uring_queue_bq_req(struct vfuse_req *req)
 {
-	struct fuse_conn *fc = req->fm->fc;
-	struct fuse_ring *ring = fc->ring;
-	struct fuse_ring_queue *queue;
-	struct fuse_ring_ent *ent = NULL;
+	struct vfuse_conn *fc = req->fm->fc;
+	struct vfuse_ring *ring = fc->ring;
+	struct vfuse_ring_queue *queue;
+	struct vfuse_ring_ent *ent = NULL;
 
-	queue = fuse_uring_task_to_queue(ring);
+	queue = vfuse_uring_task_to_queue(ring);
 	if (!queue)
 		return false;
 
@@ -1485,15 +1485,15 @@ bool fuse_uring_queue_bq_req(struct fuse_req *req)
 
 	set_bit(FR_URING, &req->flags);
 	req->ring_queue = queue;
-	list_add_tail(&req->list, &queue->fuse_req_bg_queue);
+	list_add_tail(&req->list, &queue->vfuse_req_bg_queue);
 
 	ent = list_first_entry_or_null(&queue->ent_avail_queue,
-				       struct fuse_ring_ent, list);
+				       struct vfuse_ring_ent, list);
 	spin_lock(&fc->bg_lock);
 	fc->num_background++;
 	if (fc->num_background == fc->max_background)
 		fc->blocked = 1;
-	fuse_uring_flush_bg(queue);
+	vfuse_uring_flush_bg(queue);
 	spin_unlock(&fc->bg_lock);
 
 	/*
@@ -1501,13 +1501,13 @@ bool fuse_uring_queue_bq_req(struct fuse_req *req)
 	 * in the queue that need to be handled first. Or no further req
 	 * might be available.
 	 */
-	req = list_first_entry_or_null(&queue->fuse_req_queue, struct fuse_req,
+	req = list_first_entry_or_null(&queue->vfuse_req_queue, struct vfuse_req,
 				       list);
 	if (ent && req) {
-		fuse_uring_add_req_to_ring_ent(ent, req);
+		vfuse_uring_add_req_to_ring_ent(ent, req);
 		spin_unlock(&queue->lock);
 
-		fuse_uring_dispatch_ent(ent, true);
+		vfuse_uring_dispatch_ent(ent, true);
 	} else {
 		spin_unlock(&queue->lock);
 	}
@@ -1515,21 +1515,21 @@ bool fuse_uring_queue_bq_req(struct fuse_req *req)
 	return true;
 }
 
-bool fuse_uring_remove_pending_req(struct fuse_req *req)
+bool vfuse_uring_remove_pending_req(struct vfuse_req *req)
 {
-	struct fuse_ring_queue *queue = req->ring_queue;
+	struct vfuse_ring_queue *queue = req->ring_queue;
 
-	return fuse_remove_pending_req(req, &queue->lock);
+	return vfuse_remove_pending_req(req, &queue->lock);
 }
 
-static const struct fuse_iqueue_ops fuse_io_uring_ops = {
+static const struct vfuse_iqueue_ops vfuse_io_uring_ops = {
 	/* should be send over io-uring as enhancement */
-	.send_forget = fuse_dev_queue_forget,
+	.send_forget = vfuse_dev_queue_forget,
 
 	/*
 	 * could be send over io-uring, but interrupts should be rare,
 	 * no need to make the code complex
 	 */
-	.send_interrupt = fuse_dev_queue_interrupt,
-	.send_req = fuse_uring_queue_fuse_req,
+	.send_interrupt = vfuse_dev_queue_interrupt,
+	.send_req = vfuse_uring_queue_vfuse_req,
 };
