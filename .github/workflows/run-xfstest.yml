@@ -41,15 +41,18 @@ jobs:
         pushd xfstests
         make
         popd
-    - name: Build kernel modules
-      run: |
-        pushd fuse-kernel-modules/src
-        ./build
-        popd
     - name: Build libfuse
       run: |
+        sudo modprobe fuse
+        sudo lsmod
+        sudo cat /proc/devices
         mkdir build
         pushd build
         meson ../libfuse
         ninja
+        popd
+    - name: Build kernel modules
+      run: |
+        pushd fuse-kernel-modules/src
+        ./build
         popd
