@@ -29,12 +29,12 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt update
-        sudo apt install acl attr automake bc dbench dump e2fsprogs fio gawk \
+        sudo apt -y install acl attr automake bc dbench dump e2fsprogs fio gawk \
           gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
           libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
           uuid-dev uuid-runtime xfsprogs linux-headers-$(uname -r) sqlite3 \
           libgdbm-compat-dev
-        sudo apt install meson g++ exfatprogs f2fs-tools ocfs2-tools udftools \
+        sudo apt -y install meson g++ exfatprogs f2fs-tools ocfs2-tools udftools \
           xfsdump xfslibs-dev
     - name: Build xfstest
       run: |
@@ -43,9 +43,6 @@ jobs:
         popd
     - name: Build libfuse
       run: |
-        sudo modprobe fuse
-        sudo lsmod
-        sudo cat /proc/devices
         mkdir build
         pushd build
         meson ../libfuse
@@ -55,4 +52,5 @@ jobs:
       run: |
         pushd fuse-kernel-modules/src
         ./build
+        sudo insmod modules/fuse.ko
         popd
