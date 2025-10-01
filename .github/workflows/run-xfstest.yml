@@ -1,0 +1,55 @@
+name: Build and Run xfstest
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-run-xfstest:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: checkout myself
+      uses: actions/checkout@v4
+      with:
+        path: fuse-kernel-modules
+    - name: checkout xfstests
+      uses: actions/checkout@v4
+      with:
+        repository: kdave/xfstests
+        path: xfstests
+    - name: checkout libfuse
+      uses: actions/checkout@v4
+      with:
+        repository: libfuse/libfuse
+        path: libfuse
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install acl attr automake bc dbench dump e2fsprogs fio gawk \
+          gcc git indent libacl1-dev libaio-dev libcap-dev libgdbm-dev libtool \
+          libtool-bin liburing-dev libuuid1 lvm2 make psmisc python3 quota sed \
+          uuid-dev uuid-runtime xfsprogs linux-headers-$(uname -r) sqlite3 \
+          libgdbm-compat-dev
+        sudo apt install meson g++ exfatprogs f2fs-tools ocfs2-tools udftools \
+          xfsdump xfslibs-dev
+    - name: Build xfstest
+      run: |
+        pushd xfstests
+        make
+        popd
+    - name: Build kernel modules
+      run: |
+        pushd fuse-kernel-modules/src
+        ./build
+        popd
+    - name: Build libfuse
+      run: |
+        mkdir build
+        pushd build
+        meson ../libfuse
+        ninja
+        popd
