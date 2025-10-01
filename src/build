@@ -46,7 +46,7 @@ if [[ "$i" -eq "${#KVER[@]}" ]]; then
 fi
 
 pushd ${KSRC[$i]}
-make -j $(($(nproc) / 2)) -C ${kerneldir} M=$PWD $command
+make -k -j $(($(nproc) / 2)) -C ${kerneldir} M=$PWD $command
 popd
 
 mkdir -p modules
