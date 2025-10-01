@@ -52,5 +52,5 @@ jobs:
       run: |
         pushd fuse-kernel-modules/src
         ./build
-        sudo insmod modules/fuse.ko
+        sudo insmod modules/vfuse.ko
         popd
