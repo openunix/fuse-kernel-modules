@@ -1,0 +1,32 @@
+name: x86_64 CI Full Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install build dependencies
+      run: |
+        sudo apt -y install dkms
+    - name: Install as DKMS modules
+      run: |
+        source vfuse/dkms.conf
+        sudo -E dkms add vfuse/
+        sudo -E dkms build ${PACKAGE_NAME}/${PACKAGE_VERSION}
+        sudo -E dkms install ${PACKAGE_NAME}/${PACKAGE_VERSION}
+    - name: Make check
+      run: |
+        sudo lsmod
+        sudo modprobe vfuse
+        sudo lsmod | grep vfuse
+    - name: Do test
+      run: |
+        sudo cat /proc/misc
