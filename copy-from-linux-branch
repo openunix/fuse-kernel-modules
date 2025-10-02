@@ -29,16 +29,13 @@ if [ -z "${full_version}" ]; then
     exit 1
 fi
 
-mkdir -p  src/${full_version}
-pushd src/${full_version}
-run_cmd cp -a "${linux}/fs/fuse/*.{c,h}" .
-rm -f *.mod.c
-
-#enable uring by default
-sed -i -e 's#mostly enable_uring;#mostly enable_uring = true;#' dev_uring.c
 
 # Create an "vfuse" moduel for ubuntu
 if [[ ${full_version} =~ "ubuntu" ]]; then
+    mkdir -p  vfuse/${full_version}
+    pushd vfuse/${full_version}
+    run_cmd cp -a "${linux}/fs/fuse/*.{c,h}" .
+    rm -f *.mod.c
     run_cmd cp -a ${basedir}/Makefile.vfuse Makefile
 
     # Rename to vfuse.h to avoid loading accidentally the system fuse.h
@@ -65,9 +62,16 @@ if [[ ${full_version} =~ "ubuntu" ]]; then
     # not desirable
     sed -i -e 's#VFUSE_SUPER_MAGIC#FUSE_SUPER_MAGIC#g' *.{c,h}
 else
+    mkdir -p  src/${full_version}
+    pushd src/${full_version}
+    run_cmd cp -a "${linux}/fs/fuse/*.{c,h}" .
+    rm -f *.mod.c
     run_cmd cp -a ${basedir}/Makefile.fuse Makefile
     run_cmd cp -a "${linux}/include/uapi/linux/fuse.h" .
     sed -i -e 's#<linux\/fuse\.h>#"fuse.h"#g' *.{c,h}
 fi
+
+#enable uring by default
+sed -i -e 's#mostly enable_uring;#mostly enable_uring = true;#' dev_uring.c
 
 popd
